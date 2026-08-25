@@ -11,6 +11,7 @@ import (
 	"github.com/diskc/diskc/internal/disk"
 	"github.com/diskc/diskc/internal/docker"
 	"github.com/diskc/diskc/internal/health"
+	"github.com/diskc/diskc/internal/macosystem"
 	"github.com/diskc/diskc/internal/mount"
 	"github.com/diskc/diskc/internal/proc"
 	"github.com/diskc/diskc/internal/report"
@@ -25,6 +26,12 @@ func main() {
 	}
 	if len(os.Args) > 1 && os.Args[1] == "docker" {
 		if err := docker.Run(os.Args[2:]); err != nil {
+			fatal(err)
+		}
+		return
+	}
+	if len(os.Args) > 2 && os.Args[1] == "mac" && os.Args[2] == "system" {
+		if err := macosystem.Run(os.Args[3:]); err != nil {
 			fatal(err)
 		}
 		return
@@ -48,7 +55,7 @@ func main() {
 	flag.BoolVar(&watch, "watch", false, "refresh the report continuously until interrupted")
 	flag.DurationVar(&interval, "interval", interval, "watch refresh interval, for example 3s")
 	flag.Usage = func() {
-		fmt.Fprintf(flag.CommandLine.Output(), "Usage: diskc [path ...] [flags]\n       diskc db [flags]\n       diskc docker [flags]\n\nFind what is filling a Linux filesystem.\n\nFlags:\n")
+		fmt.Fprintf(flag.CommandLine.Output(), "Usage: diskc [path ...] [flags]\n       diskc db [flags]\n       diskc docker [flags]\n       diskc mac system [flags]\n\nFind what is filling a filesystem.\n\nFlags:\n")
 		flag.PrintDefaults()
 	}
 	args := reorderArgs(os.Args[1:])

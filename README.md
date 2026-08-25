@@ -132,6 +132,39 @@ BuildKit cache: /var/lib/buildkit
 
 If Docker is not installed or its storage is elsewhere, the command prints `No Docker storage paths found.`. Configure a custom Docker `data-root` in `/etc/docker/daemon.json`; `diskc docker` will report that path automatically.
 
+Inspect macOS system storage:
+
+```bash
+diskc mac system
+diskc mac system --sample 5s --top 50
+diskc mac system --json > mac-system-report.json
+```
+
+This macOS-only command checks `/private/var`, `/Library`, `/Users`, `/Applications`, and `/System`. It identifies large files and directories, measures optional growth, and gives a conservative cleanup recommendation for each file:
+
+```text
+macOS system disk report
+Platform: darwin
+
+/private/var (system state, logs, caches, and temporary data)
+  Largest files
+        9.8 GB  /private/var/folders/.../cache.db
+      recommendation: Usually removable after closing the owning app; re-created when needed
+      risk: review before cleaning
+       6.2 GB  /private/var/log/system.log
+      recommendation: Review age and ownership; rotate or remove only known-old logs
+      risk: review before cleaning
+
+/System (macOS system files)
+       4.1 GB  /System/Library/...
+      recommendation: Do not delete manually; managed by macOS
+      risk: do not delete
+
+No files are deleted automatically.
+```
+
+The recommendations are guidance, not permission to remove files. Never manually delete `/System`, `/usr`, `/bin`, `/sbin`, `/private/var/db`, `/private/var/vm`, application support data, containers, or files owned by an active process. Prefer the owning application's cleanup controls, macOS Storage settings, or a documented administrator procedure.
+
 Watch continuously until `Ctrl-C`:
 
 ```bash
