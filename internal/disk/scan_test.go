@@ -3,6 +3,7 @@ package disk
 import (
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -70,4 +71,63 @@ func TestSelectReportFilesIncludesFastSmallFile(t *testing.T) {
 	if len(growing) != 1 || growing[0].Path != "/fast-small.log" {
 		t.Fatalf("unexpected growing files: %+v", growing)
 	}
+}
+
+func TestMeasureGrowthGroupsUsesOneSharedWindow(t *testing.T) {
+	root := t.TempDir()
+	firstPath := filepath.Join(root, "first.log")
+	secondPath := filepath.Join(root, "second.log")
+	for _, path := range []string{firstPath, secondPath} {
+		if err := os.WriteFile(path, []byte("start"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	groups := [][]File{{{Path: firstPath, Size: 5}}, {{Path: secondPath, Size: 5}}}
+	var writers sync.WaitGroup
+	writers.Add(2)
+	go func() {
+		defer writers.Done()
+		appendAfter(firstPath, 30*time.Millisecond)
+	}()
+	go func() {
+		defer writers.Done()
+		appendAfter(secondPath, 180*time.Millisecond)
+	}()
+	if err := MeasureGrowthGroups(groups, 100*time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	writers.Wait()
+	if groups[0][0].Growth <= 0 {
+		t.Fatalf("expected first group to grow, got %f", groups[0][0].Growth)
+	}
+	if groups[1][0].Growth != 0 {
+		t.Fatalf("second group was sampled in a later window: %f", groups[1][0].Growth)
+	}
+}
+
+func TestPruneCandidatesKeepsLargeAndRecentFiles(t *testing.T) {
+	files := []File{
+		{Path: "/largest", Size: 1000, ModifiedAt: 1},
+		{Path: "/second-largest", Size: 900, ModifiedAt: 2},
+		{Path: "/recent", Size: 1, ModifiedAt: 100},
+		{Path: "/older", Size: 2, ModifiedAt: 3},
+	}
+	result := pruneCandidates(files, 2)
+	seen := make(map[string]bool)
+	for _, file := range result {
+		seen[file.Path] = true
+	}
+	if !seen["/largest"] || !seen["/recent"] {
+		t.Fatalf("expected largest and recent candidates, got %+v", result)
+	}
+}
+
+func appendAfter(path string, delay time.Duration) {
+	time.Sleep(delay)
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		return
+	}
+	_, _ = file.WriteString("growth")
+	_ = file.Close()
 }

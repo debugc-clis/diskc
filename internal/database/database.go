@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/diskc/diskc/internal/disk"
-	"github.com/diskc/diskc/internal/proc"
+	"github.com/debugc-clis/diskc/internal/disk"
+	"github.com/debugc-clis/diskc/internal/proc"
 )
 
 type Instance struct {

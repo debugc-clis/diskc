@@ -3,18 +3,19 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
 
-	"github.com/diskc/diskc/internal/database"
-	"github.com/diskc/diskc/internal/disk"
-	"github.com/diskc/diskc/internal/docker"
-	"github.com/diskc/diskc/internal/health"
-	"github.com/diskc/diskc/internal/macosystem"
-	"github.com/diskc/diskc/internal/mount"
-	"github.com/diskc/diskc/internal/proc"
-	"github.com/diskc/diskc/internal/report"
+	"github.com/debugc-clis/diskc/internal/database"
+	"github.com/debugc-clis/diskc/internal/disk"
+	"github.com/debugc-clis/diskc/internal/docker"
+	"github.com/debugc-clis/diskc/internal/health"
+	"github.com/debugc-clis/diskc/internal/macosystem"
+	"github.com/debugc-clis/diskc/internal/mount"
+	"github.com/debugc-clis/diskc/internal/proc"
+	"github.com/debugc-clis/diskc/internal/report"
 )
 
 func main() {
@@ -40,7 +41,6 @@ func main() {
 		top      int
 		depth    int
 		sample   = 3 * time.Second
-		deleted  bool
 		jsonOut  bool
 		all      bool
 		watch    bool
@@ -49,7 +49,6 @@ func main() {
 	flag.IntVar(&top, "top", 20, "number of large files to report")
 	flag.IntVar(&depth, "depth", 4, "maximum directory depth to scan")
 	flag.DurationVar(&sample, "sample", sample, "measure growth over this duration; use 0 to disable, for example 5s")
-	flag.BoolVar(&deleted, "deleted", false, "include deleted files still held open by processes")
 	flag.BoolVar(&jsonOut, "json", false, "emit machine-readable JSON")
 	flag.BoolVar(&all, "all", false, "inspect all mounted physical filesystems")
 	flag.BoolVar(&watch, "watch", false, "refresh the report continuously until interrupted")
@@ -58,7 +57,7 @@ func main() {
 		fmt.Fprintf(flag.CommandLine.Output(), "Usage: diskc [path ...] [flags]\n       diskc db [flags]\n       diskc docker [flags]\n       diskc mac system [flags]\n\nFind what is filling a filesystem.\n\nFlags:\n")
 		flag.PrintDefaults()
 	}
-	args := reorderArgs(os.Args[1:])
+	args := reorderArgs(removeLegacyArgs(os.Args[1:]))
 	if err := flag.CommandLine.Parse(args); err != nil {
 		os.Exit(2)
 	}
@@ -80,7 +79,7 @@ func main() {
 			if !jsonOut {
 				fmt.Fprint(os.Stdout, "\033[H\033[2J")
 			}
-			if err := refresh(os.Stdout, roots, all, top, depth, sample, deleted, jsonOut); err != nil {
+			if err := refresh(os.Stdout, roots, all, top, depth, sample, jsonOut); err != nil {
 				fatal(err)
 			}
 			if remaining := interval - time.Since(started); remaining > 0 {
@@ -88,12 +87,21 @@ func main() {
 			}
 		}
 	}
-	if err := refresh(os.Stdout, roots, all, top, depth, sample, deleted, jsonOut); err != nil {
+	if err := refresh(os.Stdout, roots, all, top, depth, sample, jsonOut); err != nil {
 		fatal(err)
 	}
 }
 
-func refresh(writer *os.File, roots []string, all bool, top, depth int, sample time.Duration, deleted, jsonOut bool) error {
+type scannedTarget struct {
+	root        string
+	filesystem  disk.Filesystem
+	files       []disk.File
+	directories []disk.Directory
+	warnings    []string
+	health      health.Snapshot
+}
+
+func refresh(writer io.Writer, roots []string, all bool, top, depth int, sample time.Duration, jsonOut bool) error {
 	if all {
 		mounts, err := mount.All()
 		if err != nil {
@@ -101,7 +109,7 @@ func refresh(writer *os.File, roots []string, all bool, top, depth int, sample t
 		}
 		roots = append(append([]string{}, roots...), mounts...)
 	}
-	outputs := make([]report.Data, 0, len(roots))
+	targets := make([]scannedTarget, 0, len(roots))
 	for _, root := range unique(roots) {
 		filesystem, err := disk.FilesystemUsage(root)
 		if err != nil {
@@ -113,27 +121,86 @@ func refresh(writer *os.File, roots []string, all bool, top, depth int, sample t
 			fmt.Fprintf(os.Stderr, "diskc: skipping %s: %v\n", root, err)
 			continue
 		}
-		healthSnapshot := health.TakeSnapshot(filesystem.Device)
-		if sample > 0 {
-			if err := disk.MeasureGrowth(files, sample); err != nil {
-				warnings = append(warnings, err.Error())
-			}
-		}
-		disk.UpdateTrend(files, &filesystem)
-		largest, growing := disk.SelectReportFiles(files, top)
-		proc.AttributeWriters(largest)
-		proc.AttributeWriters(growing)
-		var openDeleted []proc.DeletedFile
-		if deleted {
-			openDeleted = proc.DeletedFiles()
-		}
-		findings := health.Findings(root, filesystem.Device, healthSnapshot, sample.Seconds())
-		outputs = append(outputs, report.Data{Filesystem: filesystem, Files: largest, Growing: growing, Directories: directories, Deleted: openDeleted, Findings: findings, Warnings: warnings})
+		targets = append(targets, scannedTarget{
+			root:        root,
+			filesystem:  filesystem,
+			files:       files,
+			directories: directories,
+			warnings:    warnings,
+		})
 	}
-	if len(outputs) == 0 {
+	if len(targets) == 0 {
 		return fmt.Errorf("no filesystems could be inspected")
 	}
+	groups := make([][]disk.File, len(targets))
+	for index := range targets {
+		groups[index] = targets[index].files
+		targets[index].health = health.TakeSnapshot(targets[index].filesystem.Device)
+	}
+	if err := disk.MeasureGrowthGroups(groups, sample); err != nil {
+		for index := range targets {
+			targets[index].warnings = append(targets[index].warnings, err.Error())
+		}
+	}
+
+	deletedFiles := proc.DeletedFiles()
+	outputs := make([]report.Data, 0, len(targets))
+	candidates := make([]disk.File, 0)
+	for index := range targets {
+		target := &targets[index]
+		disk.UpdateTrend(target.files, &target.filesystem)
+		largest, growing := disk.SelectReportFiles(target.files, top)
+		candidates = append(candidates, largest...)
+		candidates = append(candidates, growing...)
+		findings := health.Findings(target.root, target.filesystem.Device, target.health, sample.Seconds())
+		outputs = append(outputs, report.Data{
+			Filesystem:  target.filesystem,
+			Files:       largest,
+			Growing:     growing,
+			Directories: target.directories,
+			Deleted:     deletedForDevice(deletedFiles, target.filesystem.Device),
+			Findings:    findings,
+			Warnings:    target.warnings,
+		})
+	}
+	proc.AttributeWriters(candidates)
+	writers := make(map[string][]disk.Writer, len(candidates))
+	for _, file := range candidates {
+		if len(file.Writers) > 0 {
+			writers[file.Path] = file.Writers
+		}
+	}
+	for index := range outputs {
+		attachWriters(outputs[index].Files, writers)
+		attachWriters(outputs[index].Growing, writers)
+	}
 	return report.PrintMany(writer, outputs, jsonOut)
+}
+
+func attachWriters(files []disk.File, writers map[string][]disk.Writer) {
+	for index := range files {
+		files[index].Writers = writers[files[index].Path]
+	}
+}
+
+func deletedForDevice(files []proc.DeletedFile, device uint64) []proc.DeletedFile {
+	result := make([]proc.DeletedFile, 0)
+	for _, file := range files {
+		if file.Device == device {
+			result = append(result, file)
+		}
+	}
+	return result
+}
+
+func removeLegacyArgs(args []string) []string {
+	result := make([]string, 0, len(args))
+	for _, arg := range args {
+		if arg != "--deleted" && arg != "-deleted" {
+			result = append(result, arg)
+		}
+	}
+	return result
 }
 
 func reorderArgs(args []string) []string {
@@ -161,5 +228,5 @@ func unique(paths []string) []string {
 
 func fatal(err error) {
 	fmt.Fprintf(os.Stderr, "diskc: %v\n", err)
-	os.Exit(2)
+	os.Exit(1)
 }

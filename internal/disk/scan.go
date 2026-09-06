@@ -23,11 +23,12 @@ type Filesystem struct {
 }
 
 type File struct {
-	Path    string   `json:"path"`
-	Size    int64    `json:"size_bytes"`
-	Kind    string   `json:"kind"`
-	Growth  float64  `json:"growth_bytes_per_second"`
-	Writers []Writer `json:"writers,omitempty"`
+	Path       string   `json:"path"`
+	Size       int64    `json:"size_bytes"`
+	Kind       string   `json:"kind"`
+	Growth     float64  `json:"growth_bytes_per_second"`
+	Writers    []Writer `json:"writers,omitempty"`
+	ModifiedAt int64    `json:"-"`
 }
 
 type Directory struct {
@@ -73,6 +74,8 @@ func Scan(root string, device uint64, maxDepth, limit int) ([]File, []Directory,
 		return nil, nil, nil, err
 	}
 	files := make([]File, 0)
+	candidateLimit := scanCandidateLimit(limit)
+	fileCount := 0
 	directorySizes := make(map[string]int64)
 	warnings := make([]string, 0)
 	err = filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
@@ -107,8 +110,12 @@ func Scan(root string, device uint64, maxDepth, limit int) ([]File, []Directory,
 		if deviceErr != nil || fileDevice != device {
 			return nil
 		}
-		file := File{Path: path, Size: info.Size(), Kind: classify(path)}
+		fileCount++
+		file := File{Path: path, Size: info.Size(), Kind: classify(path), ModifiedAt: info.ModTime().UnixNano()}
 		files = append(files, file)
+		if len(files) >= candidateLimit*2 {
+			files = pruneCandidates(files, candidateLimit)
+		}
 		for parent := filepath.Dir(path); parent != "." && strings.HasPrefix(parent, root); parent = filepath.Dir(parent) {
 			directorySizes[parent] += info.Size()
 			if parent == root {
@@ -120,6 +127,10 @@ func Scan(root string, device uint64, maxDepth, limit int) ([]File, []Directory,
 	if err != nil {
 		return nil, nil, warnings, err
 	}
+	files = pruneCandidates(files, candidateLimit)
+	if fileCount > len(files) {
+		warnings = append(warnings, fmt.Sprintf("growth sampling selected %d candidates from %d regular files; largest and recently modified files were prioritized", len(files), fileCount))
+	}
 	sort.Slice(files, func(i, j int) bool { return files[i].Size > files[j].Size })
 	directories := make([]Directory, 0, len(directorySizes))
 	for path, size := range directorySizes {
@@ -130,6 +141,48 @@ func Scan(root string, device uint64, maxDepth, limit int) ([]File, []Directory,
 		directories = directories[:limit]
 	}
 	return files, directories, warnings, nil
+}
+
+func scanCandidateLimit(reportLimit int) int {
+	limit := reportLimit * 50
+	if limit < 1000 {
+		limit = 1000
+	}
+	if limit > 50000 {
+		limit = 50000
+	}
+	if limit < reportLimit {
+		return reportLimit
+	}
+	return limit
+}
+
+func pruneCandidates(files []File, limit int) []File {
+	if len(files) <= limit {
+		return files
+	}
+	bySize := append([]File(nil), files...)
+	sort.Slice(bySize, func(i, j int) bool { return bySize[i].Size > bySize[j].Size })
+	byModified := append([]File(nil), files...)
+	sort.Slice(byModified, func(i, j int) bool { return byModified[i].ModifiedAt > byModified[j].ModifiedAt })
+	result := make([]File, 0, limit)
+	seen := make(map[string]bool, limit)
+	keep := func(file File) {
+		if len(result) < limit && !seen[file.Path] {
+			seen[file.Path] = true
+			result = append(result, file)
+		}
+	}
+	for index := 0; index < limit/2; index++ {
+		keep(bySize[index])
+	}
+	for _, file := range byModified {
+		keep(file)
+		if len(result) == limit {
+			break
+		}
+	}
+	return result
 }
 
 func SelectReportFiles(files []File, limit int) ([]File, []File) {
@@ -152,32 +205,51 @@ func SelectReportFiles(files []File, limit int) ([]File, []File) {
 }
 
 func MeasureGrowth(files []File, interval time.Duration) error {
-	if len(files) == 0 {
+	return MeasureGrowthGroups([][]File{files}, interval)
+}
+
+func MeasureGrowthGroups(groups [][]File, interval time.Duration) error {
+	if interval <= 0 {
 		return nil
 	}
-	before := make(map[string]int64, len(files))
-	for _, file := range files {
-		info, err := os.Stat(file.Path)
-		if err == nil {
-			before[file.Path] = info.Size()
+	fileCount := 0
+	for _, files := range groups {
+		fileCount += len(files)
+	}
+	if fileCount == 0 {
+		return nil
+	}
+	before := make(map[string]int64, fileCount)
+	for _, files := range groups {
+		for _, file := range files {
+			info, err := os.Stat(file.Path)
+			if err == nil {
+				before[file.Path] = info.Size()
+			}
 		}
 	}
 	time.Sleep(interval)
 	seconds := interval.Seconds()
-	for index := range files {
-		info, err := os.Stat(files[index].Path)
-		if err != nil {
-			continue
+	for _, files := range groups {
+		for index := range files {
+			initialSize, found := before[files[index].Path]
+			if !found {
+				continue
+			}
+			info, err := os.Stat(files[index].Path)
+			if err != nil {
+				continue
+			}
+			files[index].Growth = float64(info.Size()-initialSize) / seconds
+			files[index].Size = info.Size()
 		}
-		files[index].Growth = float64(info.Size()-before[files[index].Path]) / seconds
-		files[index].Size = info.Size()
+		sort.Slice(files, func(i, j int) bool {
+			if files[i].Growth == files[j].Growth {
+				return files[i].Size > files[j].Size
+			}
+			return files[i].Growth > files[j].Growth
+		})
 	}
-	sort.Slice(files, func(i, j int) bool {
-		if files[i].Growth == files[j].Growth {
-			return files[i].Size > files[j].Size
-		}
-		return files[i].Growth > files[j].Growth
-	})
 	return nil
 }
 

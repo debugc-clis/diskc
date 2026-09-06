@@ -3,10 +3,11 @@ package report
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/diskc/diskc/internal/disk"
-	"github.com/diskc/diskc/internal/health"
-	"github.com/diskc/diskc/internal/proc"
 	"io"
+
+	"github.com/debugc-clis/diskc/internal/disk"
+	"github.com/debugc-clis/diskc/internal/health"
+	"github.com/debugc-clis/diskc/internal/proc"
 )
 
 type Data struct {
@@ -56,26 +57,26 @@ func text(writer io.Writer, data Data) error {
 	fmt.Fprintf(writer, "Disk pressure: %s  %.1f%% used (%s free)\n", pressure, data.Filesystem.UsedPercent, formatBytes(data.Filesystem.FreeBytes))
 	fmt.Fprintf(writer, "Inodes: %.1f%% used  |  %s\n", data.Filesystem.InodePercent, data.Filesystem.Path)
 	if data.Filesystem.GrowthBytesPerSecond > 0 {
-		fmt.Fprintf(writer, "Trend: +%s/hour\n", formatBytes(uint64(data.Filesystem.GrowthBytesPerSecond*3600)))
+		fmt.Fprintf(writer, "Observed growth: +%s/hour\n", formatBytes(uint64(data.Filesystem.GrowthBytesPerSecond*3600)))
 		if data.Filesystem.FullInSeconds > 0 {
-			fmt.Fprintf(writer, "Estimated filesystem full: ~%s\n", duration(data.Filesystem.FullInSeconds))
+			fmt.Fprintf(writer, "Estimated full at observed growth: ~%s\n", duration(data.Filesystem.FullInSeconds))
 		}
 	}
 	fmt.Fprintln(writer)
-	fmt.Fprintln(writer, "Largest files")
-	for _, file := range data.Files {
-		growth := ""
-		if file.Growth != 0 {
-			growth = fmt.Sprintf("  ↑ %s/s", formatBytes(uint64(abs(file.Growth))))
+	if len(data.Files) > 0 {
+		fmt.Fprintln(writer, "Largest files")
+		for _, file := range data.Files {
+			writers := ""
+			if len(file.Writers) > 0 {
+				writers = fmt.Sprintf("  [%d writer(s)]", len(file.Writers))
+			}
+			fmt.Fprintf(writer, "%10s  %s  (%s)%s%s\n", formatBytes(uint64(file.Size)), file.Path, file.Kind, growth(file.Growth), writers)
 		}
-		writers := ""
-		if len(file.Writers) > 0 {
-			writers = fmt.Sprintf("  [%d writer(s)]", len(file.Writers))
-		}
-		fmt.Fprintf(writer, "%10s  %s  (%s)%s%s\n", formatBytes(uint64(file.Size)), file.Path, file.Kind, growth, writers)
+	} else {
+		fmt.Fprintln(writer, "No regular files found in the scanned scope.")
 	}
 	if len(data.Directories) > 0 {
-		fmt.Fprintln(writer, "\nLargest directories")
+		fmt.Fprintln(writer, "\nLargest scanned directories")
 		for _, directory := range data.Directories {
 			fmt.Fprintf(writer, "%10s  %s\n", formatBytes(uint64(directory.Size)), directory.Path)
 		}
@@ -109,10 +110,10 @@ func text(writer io.Writer, data Data) error {
 			if file.Growth <= 0 {
 				continue
 			}
-			fmt.Fprintf(writer, "%s\n├─ rapid growth: %s/hour\n", file.Path, formatBytes(uint64(file.Growth*3600)))
-			if data.Filesystem.FullInSeconds > 0 {
-				fmt.Fprintf(writer, "└─ filesystem full in ~%s\n", duration(data.Filesystem.FullInSeconds))
-			}
+			fmt.Fprintf(writer, "%s\n└─ rapid growth: %s/hour\n", file.Path, formatBytes(uint64(file.Growth*3600)))
+		}
+		if data.Filesystem.FullInSeconds > 0 {
+			fmt.Fprintf(writer, "Filesystem could fill in ~%s at the observed aggregate growth.\n", duration(data.Filesystem.FullInSeconds))
 		}
 	}
 	if len(data.Findings) > 0 {
@@ -122,7 +123,7 @@ func text(writer io.Writer, data Data) error {
 		}
 	}
 	if len(data.Deleted) > 0 {
-		fmt.Fprintln(writer, "\nDeleted but still open")
+		fmt.Fprintf(writer, "\nDeleted but still open (%s retained)\n", formatBytes(deletedBytes(data.Deleted)))
 		for _, file := range data.Deleted {
 			fmt.Fprintf(writer, "%10s  %s", formatBytes(uint64(file.Size)), file.Path)
 			for _, processWriter := range file.Writers {
@@ -133,8 +134,15 @@ func text(writer io.Writer, data Data) error {
 	}
 	if len(data.Warnings) > 0 {
 		fmt.Fprintln(writer, "\nWarnings")
-		for _, warning := range data.Warnings {
+		visible := data.Warnings
+		if len(visible) > 5 {
+			visible = visible[:5]
+		}
+		for _, warning := range visible {
 			fmt.Fprintf(writer, "- %s\n", warning)
+		}
+		if hidden := len(data.Warnings) - len(visible); hidden > 0 {
+			fmt.Fprintf(writer, "- %d more warnings omitted; use --json for complete details\n", hidden)
 		}
 	}
 	return nil
@@ -175,6 +183,26 @@ func abs(value float64) float64 {
 	return value
 }
 
+func growth(value float64) string {
+	if value > 0 {
+		return fmt.Sprintf("  ↑ %s/s", formatBytes(uint64(value)))
+	}
+	if value < 0 {
+		return fmt.Sprintf("  ↓ %s/s", formatBytes(uint64(abs(value))))
+	}
+	return ""
+}
+
+func deletedBytes(files []proc.DeletedFile) uint64 {
+	var total uint64
+	for _, file := range files {
+		if file.Size > 0 {
+			total += uint64(file.Size)
+		}
+	}
+	return total
+}
+
 func hasWriters(files []disk.File) bool {
 	for _, file := range files {
 		if len(file.Writers) > 0 {
@@ -194,9 +222,18 @@ func hasGrowth(files []disk.File) bool {
 }
 
 func duration(seconds float64) string {
+	if seconds < 60 {
+		if seconds < 1 {
+			return "less than 1 second"
+		}
+		return fmt.Sprintf("%d seconds", int(seconds))
+	}
 	minutes := int(seconds / 60)
 	if minutes < 60 {
 		return fmt.Sprintf("%d minutes", minutes)
 	}
-	return fmt.Sprintf("%d hours %d minutes", minutes/60, minutes%60)
+	if minutes < 24*60 {
+		return fmt.Sprintf("%d hours %d minutes", minutes/60, minutes%60)
+	}
+	return fmt.Sprintf("%d days %d hours", minutes/(24*60), (minutes/60)%24)
 }

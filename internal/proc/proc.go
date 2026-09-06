@@ -5,17 +5,19 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
 
-	"github.com/diskc/diskc/internal/disk"
+	"github.com/debugc-clis/diskc/internal/disk"
 )
 
 type DeletedFile struct {
 	Path    string        `json:"path"`
 	Size    int64         `json:"size_bytes"`
 	Writers []disk.Writer `json:"writers"`
+	Device  uint64        `json:"-"`
 }
 
 func AttributeWriters(files []disk.File) {
@@ -97,7 +99,7 @@ func DeletedFiles() []DeletedFile {
 				if statErr != nil {
 					continue
 				}
-				item = &retained{file: DeletedFile{Path: strings.TrimSuffix(target, " (deleted)"), Size: info.Size()}}
+				item = &retained{file: DeletedFile{Path: strings.TrimSuffix(target, " (deleted)"), Size: info.Size(), Device: id.device}}
 				files[id] = item
 			}
 			item.file.Writers = append(item.file.Writers, writer)
@@ -107,6 +109,7 @@ func DeletedFiles() []DeletedFile {
 	for _, item := range files {
 		result = append(result, item.file)
 	}
+	sort.Slice(result, func(i, j int) bool { return result[i].Size > result[j].Size })
 	return result
 }
 

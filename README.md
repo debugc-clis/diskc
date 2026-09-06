@@ -1,34 +1,58 @@
 # diskc
 
-Find what is filling your Linux disk, how fast it is growing, and which process is writing it.
+Find what is filling a Linux or macOS filesystem, how fast it is growing, and which process is writing it.
 
-`diskc` is a read-only, SRE-focused CLI that combines the usual `df`, `df -i`, `du`, `find`, `lsof`, `ps`, and `/proc` investigation into one workflow.
+`diskc` is a read-only SRE troubleshooting CLI. The default command is intentionally useful without a long list of options.
 
-## Quick Start
-
-Build and run from source:
+## Quick start
 
 ```bash
 go build -o diskc ./cmd/diskc
 ./diskc
 ```
 
-The default command scans `/`, samples files and device activity for three seconds, and reports byte pressure, inode pressure, largest files/directories, fastest-growing files, estimated time-to-full, writable processes, and Linux storage diagnostics. Add `--deleted` to include deleted-open file detection.
+Most incidents only need one of these commands:
 
-`diskc` is read-only and does not require `sudo` or root privileges. Linux `/proc` permissions may limit process details for other users.
+| Command | Purpose |
+| --- | --- |
+| `diskc` | Investigate the root filesystem |
+| `diskc /var` | Investigate one filesystem or directory |
+| `diskc -watch` | Refresh the investigation continuously |
+| `diskc db` | Inspect local database storage and configuration |
+| `diskc docker` | Inspect host Docker and containerd storage |
+| `diskc mac system` | Inspect macOS system storage with cleanup guidance |
 
-## Example Output
+## What the default command does
+
+Running `diskc`:
+
+1. Checks byte and inode pressure on `/`.
+2. Finds the largest scanned files and directories.
+3. Samples all candidate files and device activity for three seconds.
+4. Separately surfaces small files that are growing quickly.
+5. Maps writable file descriptors to processes on Linux.
+6. Detects deleted files that are still consuming disk space on Linux.
+7. Estimates time-to-full from observed positive growth.
+8. Reports Linux mount, I/O pressure, RAID, overlay, and copy-on-write findings when available.
+
+Multiple explicit paths share one sampling window, so three filesystems do not add three separate three-second waits.
+
+## Example
 
 ```text
-$ ./diskc
+$ diskc
 Disk pressure: WARNING  92.4% used (38.0 GB free)
 Inodes: 41.0% used  |  /
-Trend: +2.4 GB/hour
-Estimated filesystem full: ~35 minutes
+Observed growth: +65.5 GB/hour
+Estimated full at observed growth: ~35 minutes
 
 Largest files
    74.8 GB  /var/log/payment/app.log  (log)  ↑ 18.2 MB/s  [1 writer(s)]
-   42.1 GB  /tmp/upload-883120.bin   (temporary/cache)  ↑ 11.8 MB/s
+   42.1 GB  /tmp/upload-883120.bin   (temporary/cache)
+
+Largest scanned directories
+  128.4 GB  /var/log
+   67.2 GB  /tmp
 
 Active writers
 /var/log/payment/app.log
@@ -38,235 +62,123 @@ Active writers
 
 Potential issues
 /var/log/payment/app.log
-├─ rapid growth: 65.5 GB/hour
-└─ filesystem full in ~35 minutes
+└─ rapid growth: 65.5 GB/hour
+Filesystem could fill in ~35 minutes at the observed aggregate growth.
 
-System diagnostics
-[info] nvme0n1: 18.4% busy, 2.1 MB/s read, 38.7 MB/s written, 40 read IOPS, 310 write IOPS
+Deleted but still open (38.2 GB retained)
+   38.2 GB  /var/log/payment/app-old.log  ← payment-api (PID 21819)
 ```
 
-## What `diskc` checks automatically
+Directory totals represent files observed within the configured scan depth and permissions. They are not complete recursive totals when parts of the tree were not scanned.
 
-- **Inode exhaustion:** reports inode utilization alongside byte utilization, so a filesystem full of tiny files is visible even when capacity remains.
-- **Small, fast-growing files:** samples every scanned regular file, then reports fastest growth separately from largest files.
-- **Disk I/O pressure:** samples the backing block device during the growth window and reports busy time, throughput, and IOPS when activity is observed. It also warns when Linux I/O pressure stall information is high.
-- **Mount and storage health:** flags read-only mounts, degraded Linux software RAID, container overlay filesystems, and Btrfs/ZFS copy-on-write filesystems where snapshots can consume capacity beyond ordinary file totals.
-- **Container context:** when Linux cgroups expose a Docker, containerd, or CRI-O container ID for a writer, includes it with the process attribution.
+## Common workflows
 
-`diskc` identifies copy-on-write and overlay risks but does not yet measure individual snapshot, image, or volume usage. It does not replace device-vendor SMART/NVMe tooling.
-
-## Common Commands
-
-Inspect database configuration and database-related disk usage:
+Inspect several mounted filesystems:
 
 ```bash
-./diskc db
-./diskc db --sample 5s
-./diskc db --json
+diskc / /data /backup
+diskc --all
 ```
 
-`diskc db` discovers PostgreSQL, MySQL/MariaDB, Redis, ClickHouse, and MongoDB from Linux process names, common configuration files, and standard data directories. It reports configuration paths, relevant storage settings, data paths, database processes, filesystem pressure, large database files, and growth rates. It does not connect to the database or modify any data.
-
-Inspect a directory or filesystem:
+Watch a busy filesystem:
 
 ```bash
-./diskc /var
-./diskc /var/log --top 50 --depth 6
+diskc -watch /var
 ```
 
-Measure growth over a custom window:
+Inspect database storage:
 
 ```bash
-./diskc /var --sample 5s
+diskc db
 ```
 
-Inspect multiple filesystems explicitly:
+`diskc db` discovers PostgreSQL, MySQL/MariaDB, Redis, ClickHouse, and MongoDB using common Linux processes, configuration files, and data directories. It does not connect to a database or modify data.
+
+Inspect Docker storage:
 
 ```bash
-./diskc / /data /backup --sample 5s
+diskc docker
 ```
 
-Discover physical filesystems automatically:
-
-```bash
-./diskc --all --sample 5s
-```
-
-Virtual filesystems such as `/proc`, `/sys`, `tmpfs`, and cgroups are excluded. Separate filesystem results are never mixed.
-
-Inspect Docker storage on the host:
-
-```bash
-./diskc docker
-./diskc docker --sample 5s --top 50
-./diskc docker --json > docker-disk-report.json
-```
-
-`diskc docker` checks common rootful and rootless Docker locations, including Docker's `data-root`, containerd storage, Docker logs, and BuildKit cache. It reports configuration and socket paths, Docker processes, filesystem pressure, largest Docker files/directories, and growth rate. It reads local files and `/proc`; it does not call the Docker API, connect to containers, delete data, or require root.
-
-Example Docker output:
-
-```text
-Docker storage
-Runtime: docker
-Config: /etc/docker/daemon.json
-Data root: /var/lib/docker
-Socket: /var/run/docker.sock
-Processes
-  PID 1842  dockerd  /usr/bin/dockerd
-  PID 1764  containerd  /usr/bin/containerd
-
-docker data root: /var/lib/docker
-  Used: 86.7%  Inodes: 31.2%  Free: 42.8 GB
-  Trend: +6.4 GB/hour
-  Largest files
-       31.4 GB  /var/lib/docker/overlay2/.../json.log  ↑ 1.8 MB/s
-       18.7 GB  /var/lib/docker/containers/.../container-json.log
-  Largest directories
-       96.2 GB  /var/lib/docker/overlay2
-       22.5 GB  /var/lib/docker/containers
-
-BuildKit cache: /var/lib/buildkit
-  Used: 43.1%  Inodes: 12.4%  Free: 210.0 GB
-```
-
-If Docker is not installed or its storage is elsewhere, the command prints `No Docker storage paths found.`. Configure a custom Docker `data-root` in `/etc/docker/daemon.json`; `diskc docker` will report that path automatically.
+This checks common rootful and rootless Docker locations, Docker's configured `data-root`, containerd storage, Docker logs, BuildKit cache, sockets, and runtime processes. It does not call the Docker API or delete container data.
 
 Inspect macOS system storage:
 
 ```bash
 diskc mac system
-diskc mac system --sample 5s --top 50
-diskc mac system --json > mac-system-report.json
 ```
 
-This macOS-only command checks `/private/var`, `/Library`, `/Users`, `/Applications`, and `/System`. It identifies large files and directories, measures optional growth, and gives a conservative cleanup recommendation for each file:
+This checks `/private/var`, `/Library`, `/Users`, `/Applications`, and `/System`. Every large file receives conservative guidance such as `review before cleaning` or `do not delete`. No file is deleted automatically.
+
+## JSON
+
+Use JSON for automation or attaching evidence to an incident:
+
+```bash
+diskc /data --json > disk-report.json
+diskc docker --json > docker-report.json
+diskc db --json > database-report.json
+diskc mac system --json > mac-report.json
+```
+
+When several filesystems are inspected, the JSON result is an array. In watch mode, each refresh is emitted as a separate JSON document without terminal control sequences.
+
+## Advanced options
+
+The defaults are designed for incident use. Tune them only when the initial result needs a narrower or deeper scan.
 
 ```text
-macOS system disk report
-Platform: darwin
-
-/private/var (system state, logs, caches, and temporary data)
-  Largest files
-        9.8 GB  /private/var/folders/.../cache.db
-      recommendation: Usually removable after closing the owning app; re-created when needed
-      risk: review before cleaning
-       6.2 GB  /private/var/log/system.log
-      recommendation: Review age and ownership; rotate or remove only known-old logs
-      risk: review before cleaning
-
-/System (macOS system files)
-       4.1 GB  /System/Library/...
-      recommendation: Do not delete manually; managed by macOS
-      risk: do not delete
-
-No files are deleted automatically.
+--top N              files to report (default: 20)
+--depth N            scan depth (default: 4)
+--sample DURATION    growth window (default: 3s; 0 disables sampling)
+--all                inspect all mounted physical filesystems
+--watch              refresh continuously
+--interval DURATION  watch refresh interval (default: 3s)
+--json               emit machine-readable JSON
 ```
 
-The recommendations are guidance, not permission to remove files. Never manually delete `/System`, `/usr`, `/bin`, `/sbin`, `/private/var/db`, `/private/var/vm`, application support data, containers, or files owned by an active process. Prefer the owning application's cleanup controls, macOS Storage settings, or a documented administrator procedure.
+The former `--deleted` option is accepted for compatibility but is no longer required; deleted-open detection now runs automatically where `/proc` is available.
 
-Watch continuously until `Ctrl-C`:
+## Safety and limitations
 
-```bash
-./diskc -watch
-./diskc --watch --interval 5s /data
-```
-
-The default refresh interval is three seconds between refresh starts. If a scan takes longer, the next refresh starts immediately.
-
-Find deleted-but-open files:
-
-```bash
-./diskc --deleted
-```
-
-Example:
-
-```text
-Deleted but still open
-   38.2 GB  /var/log/payment/app.log  ← payment-api (PID 21819)
-```
-
-## JSON Output
-
-```bash
-./diskc /data --top 50 --sample 3s --deleted --json > disk-report.json
-```
-
-For multiple filesystems, JSON output is an array:
-
-```json
-[
-  {
-    "filesystem": {
-      "path": "/data",
-      "used_percent": 92.4,
-      "inode_percent": 41
-    },
-    "files": [
-      {
-        "path": "/data/events.log",
-        "size_bytes": 13314398617,
-        "kind": "log",
-        "growth_bytes_per_second": 4299161,
-        "writers": [{"pid": 21819, "process": "payment-api", "exe": "/opt/payment/bin/payment-api", "uid": "1001"}]
-      }
-    ]
-  }
-]
-```
-
-With `--watch --json`, each refresh is emitted as a separate JSON document without terminal-control sequences.
+- `diskc` is diagnostic and read-only. It does not delete, truncate, restart, kill, or modify anything.
+- Run it as the same user as the suspected process when possible. Linux `/proc` and filesystem permissions may hide data owned by other users.
+- Time-to-full is an estimate based only on growth observed during the sample window; bursty workloads can change quickly.
+- Database files, Docker data, macOS system files, and application support data must not be deleted solely because they appear in a report.
+- `diskc` identifies copy-on-write and overlay risks but does not replace filesystem-specific snapshot tools or vendor SMART/NVMe diagnostics.
 
 ## Installation
 
 Requires Go 1.22 or newer:
 
 ```bash
-go run ./cmd/diskc
+go install github.com/debugc-clis/diskc/cmd/diskc@latest
+```
+
+Or build from a clone:
+
+```bash
 go build -o diskc ./cmd/diskc
 ```
 
-The module is organized for Homebrew. After publishing a tap:
-
-```bash
-brew tap your-org/diskc
-brew install diskc
-```
-
-The formula builds `./cmd/diskc` and installs the resulting `diskc` binary.
-
-## Flags
-
-```text
---top N              number of large files (default: 20)
---depth N            maximum directory depth (default: 4)
---sample DURATION    measure growth (default: 3s; use 0 to disable)
---deleted            include deleted files held open by processes
---json               emit machine-readable JSON
---all                inspect all mounted physical filesystems
---watch              refresh continuously until interrupted
---interval DURATION  watch refresh interval (default: 3s)
-```
-
-## Disclaimer
-
-Parts of this project, including source code, documentation, examples, and configuration, may be generated or assisted by artificial intelligence. The project is provided on an “AS IS” and “AS AVAILABLE” basis, without warranties of any kind.
-
-Use `diskc` at your own risk. The authors, maintainers, contributors, and distributors are not liable for any damage, data loss, corruption, downtime, outage, security incident, or other loss arising from the use of all or any part of this project. Review, test, and validate the code and its output before using it in production.
+Homebrew packaging is planned; do not rely on `brew install diskc` until a formula is published.
 
 ## Contributing
 
-The project uses only the Go standard library. Linux builds use filesystem statistics and `/proc` metadata.
-
-Run formatting, tests, static analysis, and builds with:
+The project uses only the Go standard library.
 
 ```bash
 gofmt -w cmd internal
 go test ./...
 go vet ./...
-go build ./cmd/diskc
-GOOS=linux GOARCH=amd64 go build -o diskc-linux ./cmd/diskc
+GOOS=linux GOARCH=amd64 go build -o /tmp/diskc-linux ./cmd/diskc
+GOOS=darwin GOARCH=arm64 go build -o /tmp/diskc-macos ./cmd/diskc
 ```
 
-Pull requests and issues are welcome at [github.com/diskc-cli/diskc](https://github.com/diskc-cli/diskc).
+Issues and pull requests are welcome at [github.com/debugc-clis/diskc](https://github.com/debugc-clis/diskc).
+
+## Disclaimer
+
+Parts of this project, including source code, documentation, examples, and configuration, may be generated or assisted by artificial intelligence. The project is provided on an “AS IS” and “AS AVAILABLE” basis, without warranties of any kind.
+
+Use `diskc` at your own risk. The authors, maintainers, contributors, and distributors are not liable for damage, data loss, corruption, downtime, outage, security incidents, or other losses arising from the use of all or any part of this project. Review, test, and validate the code and its output before using it in production.

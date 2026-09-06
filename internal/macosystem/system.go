@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/diskc/diskc/internal/disk"
+	"github.com/debugc-clis/diskc/internal/disk"
 )
 
 type Report struct {
