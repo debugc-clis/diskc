@@ -1,0 +1,113 @@
+.TH DISKC 1 "September 2026" "diskc" "User Commands"
+.SH NAME
+diskc \- explain filesystem pressure, large files, growth, and writers
+.SH SYNOPSIS
+.B diskc
+.RI [ path ...]
+.RI [ flags ]
+.br
+.B diskc light
+.RI [ path ...]
+.RI [ flags ]
+.br
+.B diskc list
+.RI [ --json ]
+.br
+.B diskc db
+.RI [ flags ]
+.br
+.B diskc docker
+.RI [ flags ]
+.br
+.B diskc doc
+.RI [ path ]
+.RI [ --json ]
+.br
+.B diskc mac system
+.RI [ flags ]
+.br
+.B diskc version
+.SH DESCRIPTION
+.B diskc
+is a read-only disk troubleshooting command for Linux and macOS. It reports
+filesystem and inode pressure, large allocated files and directories, observed
+growth, active Linux writers, and deleted-but-open Linux files.
+.PP
+Without a path, diskc inspects the root filesystem. Multiple paths share one
+growth-sampling window. Explicit paths are the opt-in mechanism for network
+filesystems; automatic all-filesystem scans exclude remote mounts.
+.SH COMMANDS
+.TP
+.B light
+Use a shallow scan, report ten entries, disable growth waiting, and skip process
+file-descriptor inspection.
+.TP
+.B list
+List mounted filesystems without traversing files. Remote and unknown mounts are
+identified but are not probed, avoiding hangs on stale network mounts.
+.TP
+.B db
+Discover common PostgreSQL, MySQL/MariaDB, Redis, ClickHouse, and MongoDB paths
+and inspect their disk usage without connecting to a database.
+.TP
+.B docker
+Inspect common Docker, containerd, BuildKit, and rootless storage locations
+without requiring Docker daemon access.
+.TP
+.B doc
+Show diskc's built-in defaults, build information, mount discovery, filesystem
+access, capacity and inode pressure, and process inspection capability. The
+default path is /; use an explicit path to check another filesystem. No file
+tree is scanned. --json emits a machine-readable report.
+.TP
+.B mac system
+Inspect common macOS system and user storage roots and provide conservative
+cleanup guidance. Nothing is deleted.
+.TP
+.B version
+Print version, commit, build date, Go version, and target platform.
+.SH OPTIONS
+.TP
+.BI --top " N"
+Number of largest and fastest-growing files to report. Default: 20.
+.TP
+.BI --depth " N"
+Maximum directory depth to scan. Default: 4.
+.TP
+.BI --sample " DURATION"
+Growth measurement window. Default: 3s. Use 0 to disable.
+.TP
+.B --all
+Inspect all automatically discovered local filesystems.
+.TP
+.B --watch
+Refresh continuously. Terminal output is redrawn only when stdout is a terminal.
+.TP
+.BI --interval " DURATION"
+Delay after each completed watch scan. Default: 3s.
+.TP
+.B --json
+Emit JSON. With --watch, emit one compact JSON value per line (NDJSON).
+.SH SIZE SEMANTICS
+File and directory rankings use filesystem-allocated bytes rather than apparent
+length. Sparse files therefore do not look like consumed disk space, and hard
+links are counted once per scan. JSON also includes apparent bytes.
+.PP
+Filesystem output distinguishes used, free, available, reserved, and pressure.
+Pressure is based on bytes unavailable to an unprivileged process.
+.SH EXIT STATUS
+0 indicates success or help, 1 indicates a runtime failure, and 2 indicates
+invalid command usage. Broken-pipe termination is treated as success.
+.SH PERMISSIONS
+No root access is required. Files and Linux process details hidden by permissions
+cannot be reported; run diskc as the affected service user when practical.
+.SH SAFETY
+diskc is diagnostic and read-only. Validate findings before deleting files or
+taking production action. See DISCLAIMER.md in the distribution.
+.SH AUTHORS
+diskc contributors.
+.SH SEE ALSO
+.BR df (1),
+.BR du (1),
+.BR lsof (8),
+.BR find (1)

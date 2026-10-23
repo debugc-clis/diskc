@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -12,8 +13,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/debugc-clis/diskc/internal/cliutil"
 	"github.com/debugc-clis/diskc/internal/disk"
 	"github.com/debugc-clis/diskc/internal/proc"
+	"github.com/debugc-clis/diskc/internal/settings"
+	"github.com/debugc-clis/diskc/internal/textfmt"
 )
 
 type Instance struct {
@@ -36,7 +40,11 @@ type Filesystem struct {
 	Path        string           `json:"path"`
 	Usage       disk.Filesystem  `json:"usage"`
 	Files       []disk.File      `json:"files,omitempty"`
+	Growing     []disk.File      `json:"fastest_growing,omitempty"`
 	Directories []disk.Directory `json:"directories,omitempty"`
+	Warnings    []string         `json:"warnings,omitempty"`
+	Error       string           `json:"error,omitempty"`
+	candidates  []disk.File
 }
 
 type definition struct {
@@ -53,114 +61,201 @@ var definitions = []definition{
 	{Engine: "mongodb", ConfigGlobs: []string{"/etc/mongod.conf", "/etc/mongodb.conf"}, DataPaths: []string{"/var/lib/mongodb"}},
 }
 
-func Run(args []string) error {
+var discover = Discover
+var filesystemUsage = disk.FilesystemUsage
+var scan = disk.Scan
+var measureGrowthGroups = disk.MeasureGrowthGroups
+var attributeWriters = proc.AttributeWriters
+
+func Run(args []string, stdout, stderr io.Writer) error {
 	flags := flag.NewFlagSet("db", flag.ContinueOnError)
-	flags.SetOutput(os.Stderr)
-	top := flags.Int("top", 20, "number of large database files to report")
-	depth := flags.Int("depth", 4, "maximum database directory depth to scan")
-	sample := flags.Duration("sample", 3*time.Second, "measure database file growth over this duration")
+	flags.SetOutput(io.Discard)
+	top := flags.Int("top", settings.Top, "number of large database files to report")
+	depth := flags.Int("depth", settings.Depth, "maximum database directory depth to scan")
+	sample := flags.Duration("sample", settings.Sample, "measure database file growth over this duration")
 	jsonOutput := flags.Bool("json", false, "emit machine-readable JSON")
+	flags.Usage = func() {
+		fmt.Fprintln(stdout, "Usage: diskc db [--top N] [--depth N] [--sample DURATION] [--json]\n\nInspect local database configuration and disk usage.")
+		flags.SetOutput(stdout)
+		flags.PrintDefaults()
+	}
 	if err := flags.Parse(args); err != nil {
 		if err == flag.ErrHelp {
 			return nil
 		}
-		return err
+		return cliutil.Usage(err)
 	}
-	if *top < 1 || *depth < 0 || *sample < 0 {
-		return fmt.Errorf("db: top must be positive; depth and sample must be non-negative")
+	if flags.NArg() != 0 {
+		return cliutil.Usage(fmt.Errorf("db: unexpected argument %q", flags.Arg(0)))
 	}
-	instances := Discover()
+	if *top < 1 || *top > disk.MaxReportFiles || *depth < 0 || *sample < 0 {
+		return cliutil.Usage(fmt.Errorf("db: top must be between 1 and %d; depth and sample must be non-negative", disk.MaxReportFiles))
+	}
+	instances := discover()
 	if len(instances) == 0 {
 		if *jsonOutput {
-			_, err := fmt.Fprintln(os.Stdout, "[]")
+			_, err := fmt.Fprintln(stdout, "[]")
 			return err
 		}
-		fmt.Fprintln(os.Stdout, "No supported database configuration, data directory, or process found.")
-		return nil
+		_, err := fmt.Fprintln(stdout, "No supported database configuration, data directory, or process found.")
+		return err
 	}
-	for index := range instances {
-		for _, path := range instances[index].DataPaths {
-			usage, err := disk.FilesystemUsage(path)
-			if err != nil {
-				continue
-			}
-			files, directories, _, err := disk.Scan(path, usage.Device, *depth, *top)
-			if err != nil {
-				continue
-			}
-			if *sample > 0 {
-				_ = disk.MeasureGrowth(files, *sample)
-			}
-			disk.UpdateTrend(files, &usage)
-			proc.AttributeWriters(files)
-			instances[index].Filesystems = append(instances[index].Filesystems, Filesystem{Path: path, Usage: usage, Files: files, Directories: directories})
-		}
-	}
-	if len(instances) == 0 {
-		return fmt.Errorf("db: no supported database configuration, data directory, or process found")
-	}
-	return Print(instances, *jsonOutput)
+	inspect(instances, *top, *depth, *sample)
+	return Print(stdout, instances, *jsonOutput)
 }
 
-func Print(data []Instance, jsonOutput bool) error {
+type filesystemRef struct {
+	instance int
+	index    int
+}
+
+func inspect(instances []Instance, top, depth int, sample time.Duration) {
+	refs := make([]filesystemRef, 0)
+	for instanceIndex := range instances {
+		for _, path := range instances[instanceIndex].DataPaths {
+			filesystem := Filesystem{Path: path}
+			usage, err := filesystemUsage(path)
+			if err != nil {
+				filesystem.Error = fmt.Sprintf("cannot inspect: %v", err)
+				instances[instanceIndex].Filesystems = append(instances[instanceIndex].Filesystems, filesystem)
+				continue
+			}
+			filesystem.Usage = usage
+			files, directories, warnings, err := scan(path, usage.Device, depth, top)
+			filesystem.Warnings = append(filesystem.Warnings, warnings...)
+			if err != nil {
+				filesystem.Error = fmt.Sprintf("cannot scan: %v", err)
+				instances[instanceIndex].Filesystems = append(instances[instanceIndex].Filesystems, filesystem)
+				continue
+			}
+			filesystem.candidates = files
+			filesystem.Directories = directories
+			instances[instanceIndex].Filesystems = append(instances[instanceIndex].Filesystems, filesystem)
+			refs = append(refs, filesystemRef{instance: instanceIndex, index: len(instances[instanceIndex].Filesystems) - 1})
+		}
+	}
+	groups := make([][]disk.File, 0, len(refs))
+	for _, ref := range refs {
+		groups = append(groups, instances[ref.instance].Filesystems[ref.index].candidates)
+	}
+	if err := measureGrowthGroups(groups, sample); err != nil {
+		for _, ref := range refs {
+			filesystem := &instances[ref.instance].Filesystems[ref.index]
+			filesystem.Warnings = append(filesystem.Warnings, err.Error())
+		}
+	}
+	candidates := make([]disk.File, 0)
+	for _, ref := range refs {
+		filesystem := &instances[ref.instance].Filesystems[ref.index]
+		disk.UpdateTrend(filesystem.candidates, &filesystem.Usage)
+		filesystem.Files, filesystem.Growing = disk.SelectReportFiles(filesystem.candidates, top)
+		candidates = append(candidates, filesystem.Files...)
+		candidates = append(candidates, filesystem.Growing...)
+	}
+	attributeWriters(candidates)
+	writers := make(map[string][]disk.Writer, len(candidates))
+	for _, file := range candidates {
+		if len(file.Writers) > 0 {
+			writers[file.Path] = file.Writers
+		}
+	}
+	for _, ref := range refs {
+		filesystem := &instances[ref.instance].Filesystems[ref.index]
+		attachWriters(filesystem.Files, writers)
+		attachWriters(filesystem.Growing, writers)
+		filesystem.candidates = nil
+	}
+}
+
+func attachWriters(files []disk.File, writers map[string][]disk.Writer) {
+	for index := range files {
+		files[index].Writers = writers[files[index].Path]
+	}
+}
+
+func Print(writer io.Writer, data []Instance, jsonOutput bool) error {
 	if jsonOutput {
-		encoder := json.NewEncoder(os.Stdout)
+		encoder := json.NewEncoder(writer)
 		encoder.SetIndent("", "  ")
 		return encoder.Encode(data)
 	}
+	checked := textfmt.NewWriter(writer)
+	writer = checked
 	for _, instance := range data {
-		fmt.Printf("Database: %s\n", instance.Engine)
+		fmt.Fprintf(writer, "Database: %s\n", textfmt.Safe(instance.Engine))
 		if len(instance.Processes) > 0 {
-			fmt.Println("Processes")
+			fmt.Fprintln(writer, "Processes")
 			for _, process := range instance.Processes {
-				fmt.Printf("  PID %d  %s  %s\n", process.PID, process.Process, process.Exe)
+				fmt.Fprintf(writer, "  PID %d  %s  %s\n", process.PID, textfmt.Safe(process.Process), textfmt.Safe(process.Exe))
 			}
 		}
 		if len(instance.Configs) > 0 {
-			fmt.Println("Configuration")
+			fmt.Fprintln(writer, "Configuration")
 			for _, config := range instance.Configs {
-				fmt.Printf("  %s\n", config)
+				fmt.Fprintf(writer, "  %s\n", textfmt.Safe(config))
 			}
 		}
 		if len(instance.Settings) > 0 {
-			fmt.Println("Relevant settings")
+			fmt.Fprintln(writer, "Relevant settings")
 			keys := make([]string, 0, len(instance.Settings))
 			for key := range instance.Settings {
 				keys = append(keys, key)
 			}
 			sort.Strings(keys)
 			for _, key := range keys {
-				fmt.Printf("  %-28s %s\n", key, instance.Settings[key])
+				fmt.Fprintf(writer, "  %-28s %s\n", textfmt.Safe(key), textfmt.Safe(instance.Settings[key]))
 			}
 		}
 		if len(instance.DataPaths) > 0 {
-			fmt.Println("Data paths")
+			fmt.Fprintln(writer, "Data paths")
 			for _, path := range instance.DataPaths {
-				fmt.Printf("  %s\n", path)
+				fmt.Fprintf(writer, "  %s\n", textfmt.Safe(path))
 			}
 		}
 		if len(instance.LogPaths) > 0 {
-			fmt.Println("Log paths")
+			fmt.Fprintln(writer, "Log paths")
 			for _, path := range instance.LogPaths {
-				fmt.Printf("  %s\n", path)
+				fmt.Fprintf(writer, "  %s\n", textfmt.Safe(path))
 			}
 		}
 		for _, filesystem := range instance.Filesystems {
-			fmt.Printf("\nFilesystem: %s\n", filesystem.Path)
-			fmt.Printf("  Used: %.1f%%  Inodes: %.1f%%  Free: %s\n", filesystem.Usage.UsedPercent, filesystem.Usage.InodePercent, formatBytes(filesystem.Usage.FreeBytes))
+			fmt.Fprintf(writer, "\nFilesystem: %s\n", textfmt.Safe(filesystem.Path))
+			if filesystem.Error != "" {
+				fmt.Fprintf(writer, "  Unavailable: %s\n", textfmt.Safe(filesystem.Error))
+				for _, warning := range filesystem.Warnings {
+					fmt.Fprintf(writer, "  Warning: %s\n", textfmt.Safe(warning))
+				}
+				continue
+			}
+			fmt.Fprintf(writer, "  Pressure: %.1f%%  Used: %.1f%%  Inodes: %.1f%%  Available: %s\n", filesystem.Usage.PressurePercent, filesystem.Usage.UsedPercent, filesystem.Usage.InodePercent, formatBytes(filesystem.Usage.AvailableBytes))
 			if filesystem.Usage.GrowthBytesPerSecond > 0 {
-				fmt.Printf("  Trend: +%s/hour\n", formatBytes(uint64(filesystem.Usage.GrowthBytesPerSecond*3600)))
+				fmt.Fprintf(writer, "  Trend: +%s/hour\n", formatBytes(uint64(filesystem.Usage.GrowthBytesPerSecond*3600)))
 			}
 			for _, file := range filesystem.Files {
-				growth := ""
-				if file.Growth != 0 {
-					growth = fmt.Sprintf("  ↑ %s/s", formatBytes(uint64(abs(file.Growth))))
+				fmt.Fprintf(writer, "  %10s  %s%s\n", formatBytes(uint64(file.AllocatedBytes)), textfmt.Safe(file.Path), growth(file.Growth))
+			}
+			if len(filesystem.Growing) > 0 {
+				fmt.Fprintln(writer, "  Fastest growth")
+				for _, file := range filesystem.Growing {
+					fmt.Fprintf(writer, "  %10s/s  %s\n", formatBytes(uint64(file.Growth)), textfmt.Safe(file.Path))
 				}
-				fmt.Printf("  %10s  %s%s\n", formatBytes(uint64(file.Size)), file.Path, growth)
+			}
+			for _, warning := range filesystem.Warnings {
+				fmt.Fprintf(writer, "  Warning: %s\n", textfmt.Safe(warning))
 			}
 		}
 	}
-	return nil
+	return checked.Err()
+}
+
+func growth(value float64) string {
+	if value > 0 {
+		return fmt.Sprintf("  ↑ %s/s", formatBytes(uint64(value)))
+	}
+	if value < 0 {
+		return fmt.Sprintf("  ↓ %s/s", formatBytes(uint64(-value)))
+	}
+	return ""
 }
 
 func formatBytes(value uint64) string {
@@ -175,13 +270,6 @@ func formatBytes(value uint64) string {
 		return fmt.Sprintf("%d B", value)
 	}
 	return fmt.Sprintf("%.1f %s", number, units[unit])
-}
-
-func abs(value float64) float64 {
-	if value < 0 {
-		return -value
-	}
-	return value
 }
 
 func Discover() []Instance {

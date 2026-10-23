@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -11,7 +12,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/debugc-clis/diskc/internal/cliutil"
 	"github.com/debugc-clis/diskc/internal/disk"
+	"github.com/debugc-clis/diskc/internal/settings"
+	"github.com/debugc-clis/diskc/internal/textfmt"
 )
 
 type Report struct {
@@ -24,14 +28,17 @@ type RootReport struct {
 	Path        string           `json:"path"`
 	Category    string           `json:"category"`
 	Files       []FileReport     `json:"files,omitempty"`
+	Growing     []FileReport     `json:"fastest_growing,omitempty"`
 	Directories []disk.Directory `json:"directories,omitempty"`
 	Skipped     bool             `json:"skipped,omitempty"`
 	SkipReason  string           `json:"skip_reason,omitempty"`
+	candidates  []disk.File
 }
 
 type FileReport struct {
 	Path           string  `json:"path"`
-	SizeBytes      int64   `json:"size_bytes"`
+	AllocatedBytes int64   `json:"allocated_bytes"`
+	ApparentBytes  int64   `json:"apparent_bytes"`
 	Growth         float64 `json:"growth_bytes_per_second,omitempty"`
 	Kind           string  `json:"kind"`
 	Recommendation string  `json:"recommendation"`
@@ -51,33 +58,40 @@ var roots = []rootDefinition{
 	{Path: "/System", Category: "macOS system files"},
 }
 
-func Run(args []string) error {
+func Run(args []string, stdout, stderr io.Writer) error {
 	flags := flag.NewFlagSet("mac system", flag.ContinueOnError)
-	flags.SetOutput(os.Stderr)
-	top := flags.Int("top", 20, "number of large files per system directory")
-	depth := flags.Int("depth", 5, "maximum directory depth to scan")
+	flags.SetOutput(io.Discard)
+	top := flags.Int("top", settings.Top, "number of large files per system directory")
+	depth := flags.Int("depth", settings.MacDepth, "maximum directory depth to scan")
 	sample := flags.Duration("sample", 0, "measure growth over this duration, for example 5s")
 	jsonOutput := flags.Bool("json", false, "emit machine-readable JSON")
+	flags.Usage = func() {
+		fmt.Fprintln(stdout, "Usage: diskc mac system [--top N] [--depth N] [--sample DURATION] [--json]\n\nInspect macOS system storage and provide cautious cleanup guidance.")
+		flags.SetOutput(stdout)
+		flags.PrintDefaults()
+	}
 	if err := flags.Parse(args); err != nil {
 		if err == flag.ErrHelp {
 			return nil
 		}
-		return err
+		return cliutil.Usage(err)
 	}
-	if *top < 1 || *depth < 0 || *sample < 0 {
-		return fmt.Errorf("mac system: top must be positive; depth and sample must be non-negative")
+	if flags.NArg() != 0 {
+		return cliutil.Usage(fmt.Errorf("mac system: unexpected argument %q", flags.Arg(0)))
+	}
+	if *top < 1 || *top > disk.MaxReportFiles || *depth < 0 || *sample < 0 {
+		return cliutil.Usage(fmt.Errorf("mac system: top must be between 1 and %d; depth and sample must be non-negative", disk.MaxReportFiles))
 	}
 	if runtime.GOOS != "darwin" {
 		return fmt.Errorf("mac system: this command requires macOS; current platform is %s", runtime.GOOS)
 	}
 	report := inspect(*top, *depth, *sample)
 	if *jsonOutput {
-		encoder := json.NewEncoder(os.Stdout)
+		encoder := json.NewEncoder(stdout)
 		encoder.SetIndent("", "  ")
 		return encoder.Encode(report)
 	}
-	print(report)
-	return nil
+	return print(stdout, report)
 }
 
 func inspect(top, maxDepth int, sample time.Duration) Report {
@@ -96,29 +110,32 @@ func inspect(top, maxDepth int, sample time.Duration) Report {
 			report.Warnings = append(report.Warnings, fmt.Sprintf("cannot scan %s: %v", definition.Path, err))
 			continue
 		}
-		if sample > 0 {
-			if err := disk.MeasureGrowth(files, sample); err != nil {
-				warnings = append(warnings, err.Error())
-			}
-		}
-		sort.Slice(files, func(i, j int) bool {
-			if files[i].Growth == files[j].Growth {
-				return files[i].Size > files[j].Size
-			}
-			return files[i].Growth > files[j].Growth
-		})
-		if len(files) > top {
-			files = files[:top]
-		}
-		items := make([]FileReport, 0, len(files))
-		for _, file := range files {
-			recommendation, risk := recommendation(file.Path, file.Size)
-			items = append(items, FileReport{Path: file.Path, SizeBytes: file.Size, Growth: file.Growth, Kind: file.Kind, Recommendation: recommendation, Risk: risk})
-		}
-		report.Roots = append(report.Roots, RootReport{Path: definition.Path, Category: definition.Category, Files: items, Directories: directories})
+		report.Roots = append(report.Roots, RootReport{Path: definition.Path, Category: definition.Category, Directories: directories, candidates: files})
 		report.Warnings = append(report.Warnings, warnings...)
 	}
+	groups := make([][]disk.File, len(report.Roots))
+	for index := range report.Roots {
+		groups[index] = report.Roots[index].candidates
+	}
+	if err := disk.MeasureGrowthGroups(groups, sample); err != nil {
+		report.Warnings = append(report.Warnings, err.Error())
+	}
+	for index := range report.Roots {
+		largest, growing := disk.SelectReportFiles(report.Roots[index].candidates, top)
+		report.Roots[index].Files = fileReports(largest)
+		report.Roots[index].Growing = fileReports(growing)
+		report.Roots[index].candidates = nil
+	}
 	return report
+}
+
+func fileReports(files []disk.File) []FileReport {
+	items := make([]FileReport, 0, len(files))
+	for _, file := range files {
+		recommendation, risk := recommendation(file.Path, file.AllocatedBytes)
+		items = append(items, FileReport{Path: file.Path, AllocatedBytes: file.AllocatedBytes, ApparentBytes: file.ApparentBytes, Growth: file.Growth, Kind: file.Kind, Recommendation: recommendation, Risk: risk})
+	}
+	return items
 }
 
 func recommendation(path string, size int64) (string, string) {
@@ -147,37 +164,46 @@ func recommendation(path string, size int64) (string, string) {
 	}
 }
 
-func print(report Report) {
-	fmt.Printf("macOS system disk report\nPlatform: %s\n", report.Platform)
+func print(writer io.Writer, report Report) error {
+	checked := textfmt.NewWriter(writer)
+	writer = checked
+	fmt.Fprintf(writer, "macOS system disk report\nPlatform: %s\n", textfmt.Safe(report.Platform))
 	for _, root := range report.Roots {
-		fmt.Printf("\n%s (%s)\n", root.Path, root.Category)
+		fmt.Fprintf(writer, "\n%s (%s)\n", textfmt.Safe(root.Path), textfmt.Safe(root.Category))
 		if len(root.Files) == 0 {
-			fmt.Println("  No regular files found at the selected depth.")
+			fmt.Fprintln(writer, "  No regular files found at the selected depth.")
 			continue
 		}
-		fmt.Println("  Largest files")
+		fmt.Fprintln(writer, "  Largest files")
 		for _, file := range root.Files {
 			growth := ""
 			if file.Growth > 0 {
 				growth = fmt.Sprintf("  ↑ %s/s", formatBytes(uint64(file.Growth)))
 			}
-			fmt.Printf("    %10s  %s%s\n", formatBytes(uint64(file.SizeBytes)), file.Path, growth)
-			fmt.Printf("      recommendation: %s\n      risk: %s\n", file.Recommendation, file.Risk)
+			fmt.Fprintf(writer, "    %10s  %s%s\n", formatBytes(uint64(file.AllocatedBytes)), textfmt.Safe(file.Path), growth)
+			fmt.Fprintf(writer, "      recommendation: %s\n      risk: %s\n", textfmt.Safe(file.Recommendation), textfmt.Safe(file.Risk))
+		}
+		if len(root.Growing) > 0 {
+			fmt.Fprintln(writer, "  Fastest growth")
+			for _, file := range root.Growing {
+				fmt.Fprintf(writer, "    %10s/s  %s\n", formatBytes(uint64(file.Growth)), textfmt.Safe(file.Path))
+			}
 		}
 		if len(root.Directories) > 0 {
-			fmt.Println("  Largest directories")
+			fmt.Fprintln(writer, "  Largest directories")
 			for _, directory := range root.Directories[:min(5, len(root.Directories))] {
-				fmt.Printf("    %10s  %s\n", formatBytes(uint64(directory.Size)), directory.Path)
+				fmt.Fprintf(writer, "    %10s  %s\n", formatBytes(uint64(directory.AllocatedBytes)), textfmt.Safe(directory.Path))
 			}
 		}
 	}
 	if len(report.Warnings) > 0 {
-		fmt.Println("\nWarnings")
+		fmt.Fprintln(writer, "\nWarnings")
 		for _, warning := range report.Warnings {
-			fmt.Printf("- %s\n", warning)
+			fmt.Fprintf(writer, "- %s\n", textfmt.Safe(warning))
 		}
 	}
-	fmt.Println("\nNo files are deleted automatically.")
+	fmt.Fprintln(writer, "\nNo files are deleted automatically.")
+	return checked.Err()
 }
 
 func formatBytes(value uint64) string {

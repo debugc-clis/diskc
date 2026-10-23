@@ -1,0 +1,52 @@
+version: 2
+
+project_name: diskc
+
+before:
+  hooks:
+    - go mod verify
+    - go test ./...
+
+builds:
+  - id: diskc
+    main: ./cmd/diskc
+    binary: diskc
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - >-
+        -s -w
+        -X github.com/debugc-clis/diskc/internal/buildinfo.Version={{.Version}}
+        -X github.com/debugc-clis/diskc/internal/buildinfo.Commit={{.Commit}}
+        -X github.com/debugc-clis/diskc/internal/buildinfo.Date={{.Date}}
+
+archives:
+  - id: default
+    formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    files:
+      - LICENSE
+      - README.md
+      - DISCLAIMER.md
+      - docs/diskc.1
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+sboms:
+  - artifacts: archive
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'

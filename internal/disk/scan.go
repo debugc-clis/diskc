@@ -1,6 +1,7 @@
 package disk
 
 import (
+	"container/heap"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,30 +11,41 @@ import (
 	"time"
 )
 
+const (
+	MaxReportFiles  = 1000
+	maxScanWarnings = 100
+)
+
 type Filesystem struct {
 	Path                 string  `json:"path"`
 	Device               uint64  `json:"-"`
 	TotalBytes           uint64  `json:"total_bytes"`
 	UsedBytes            uint64  `json:"used_bytes"`
 	FreeBytes            uint64  `json:"free_bytes"`
+	AvailableBytes       uint64  `json:"available_bytes"`
+	ReservedBytes        uint64  `json:"reserved_bytes"`
 	UsedPercent          float64 `json:"used_percent"`
+	PressurePercent      float64 `json:"pressure_percent"`
 	InodePercent         float64 `json:"inode_percent"`
 	GrowthBytesPerSecond float64 `json:"growth_bytes_per_second,omitempty"`
 	FullInSeconds        float64 `json:"full_in_seconds,omitempty"`
 }
 
 type File struct {
-	Path       string   `json:"path"`
-	Size       int64    `json:"size_bytes"`
-	Kind       string   `json:"kind"`
-	Growth     float64  `json:"growth_bytes_per_second"`
-	Writers    []Writer `json:"writers,omitempty"`
-	ModifiedAt int64    `json:"-"`
+	Path           string   `json:"path"`
+	AllocatedBytes int64    `json:"allocated_bytes"`
+	ApparentBytes  int64    `json:"apparent_bytes"`
+	Kind           string   `json:"kind"`
+	Growth         float64  `json:"growth_bytes_per_second"`
+	Writers        []Writer `json:"writers,omitempty"`
+	ModifiedAt     int64    `json:"-"`
 }
 
 type Directory struct {
-	Path string `json:"path"`
-	Size int64  `json:"size_bytes"`
+	Path           string `json:"path"`
+	AllocatedBytes int64  `json:"allocated_bytes"`
+	ApparentBytes  int64  `json:"apparent_bytes"`
+	Estimated      bool   `json:"estimated,omitempty"`
 }
 
 type Writer struct {
@@ -43,6 +55,20 @@ type Writer struct {
 	UID       string `json:"uid"`
 	Service   string `json:"service,omitempty"`
 	Container string `json:"container,omitempty"`
+}
+
+type fileMetadata struct {
+	device         uint64
+	inode          uint64
+	links          uint64
+	allocatedBytes int64
+	apparentBytes  int64
+	modifiedAt     int64
+}
+
+type inodeKey struct {
+	device uint64
+	inode  uint64
 }
 
 func FilesystemUsage(path string) (Filesystem, error) {
@@ -59,13 +85,33 @@ func FilesystemUsage(path string) (Filesystem, error) {
 		return Filesystem{}, err
 	}
 	total := stat.Blocks * uint64(stat.Bsize)
-	free := stat.Bavail * uint64(stat.Bsize)
+	free := stat.Bfree * uint64(stat.Bsize)
+	available := stat.Bavail * uint64(stat.Bsize)
+	if free > total {
+		free = total
+	}
+	if available > free {
+		available = free
+	}
+	used := total - free
+	reserved := free - available
 	inodeTotal := stat.Files
 	inodeFree := stat.Ffree
-	used := total - free
-	usedPercent := percent(used, total)
-	inodePercent := percent(inodeTotal-inodeFree, inodeTotal)
-	return Filesystem{Path: absolutePath, Device: device, TotalBytes: total, UsedBytes: used, FreeBytes: free, UsedPercent: usedPercent, InodePercent: inodePercent}, nil
+	if inodeFree > inodeTotal {
+		inodeFree = inodeTotal
+	}
+	return Filesystem{
+		Path:            absolutePath,
+		Device:          device,
+		TotalBytes:      total,
+		UsedBytes:       used,
+		FreeBytes:       free,
+		AvailableBytes:  available,
+		ReservedBytes:   reserved,
+		UsedPercent:     percent(used, total),
+		PressurePercent: percent(total-available, total),
+		InodePercent:    percent(inodeTotal-inodeFree, inodeTotal),
+	}, nil
 }
 
 func Scan(root string, device uint64, maxDepth, limit int) ([]File, []Directory, []string, error) {
@@ -73,14 +119,18 @@ func Scan(root string, device uint64, maxDepth, limit int) ([]File, []Directory,
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	files := make([]File, 0)
 	candidateLimit := scanCandidateLimit(limit)
+	largest := newFileHeap(candidateLimit, lessAllocated)
+	recent := newFileHeap(candidateLimit, lessModified)
+	directories := newDirectoryTracker(candidateLimit)
+	warnings := newWarningCollector(maxScanWarnings)
+	hardLinks := make(map[inodeKey]struct{})
 	fileCount := 0
-	directorySizes := make(map[string]int64)
-	warnings := make([]string, 0)
+	hardLinkDuplicates := 0
+
 	err = filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
-			warnings = append(warnings, fmt.Sprintf("cannot read %s: %v", path, walkErr))
+			warnings.add(fmt.Sprintf("cannot read %s: %v", path, walkErr))
 			if entry != nil && entry.IsDir() {
 				return filepath.SkipDir
 			}
@@ -91,8 +141,17 @@ func Scan(root string, device uint64, maxDepth, limit int) ([]File, []Directory,
 				return filepath.SkipDir
 			}
 			if path != root {
-				entryDevice, statErr := deviceOf(path)
-				if statErr == nil && entryDevice != device {
+				info, statErr := entry.Info()
+				if statErr != nil {
+					warnings.add(fmt.Sprintf("cannot stat %s: %v", path, statErr))
+					return filepath.SkipDir
+				}
+				metadata, metadataErr := metadataFromInfo(info)
+				if metadataErr != nil {
+					warnings.add(fmt.Sprintf("cannot inspect %s: %v", path, metadataErr))
+					return filepath.SkipDir
+				}
+				if metadata.device != device {
 					return filepath.SkipDir
 				}
 			}
@@ -103,21 +162,33 @@ func Scan(root string, device uint64, maxDepth, limit int) ([]File, []Directory,
 		}
 		info, statErr := entry.Info()
 		if statErr != nil {
-			warnings = append(warnings, fmt.Sprintf("cannot stat %s: %v", path, statErr))
+			warnings.add(fmt.Sprintf("cannot stat %s: %v", path, statErr))
 			return nil
 		}
-		fileDevice, deviceErr := deviceOf(path)
-		if deviceErr != nil || fileDevice != device {
+		metadata, metadataErr := metadataFromInfo(info)
+		if metadataErr != nil || metadata.device != device {
 			return nil
+		}
+		if metadata.links > 1 {
+			key := inodeKey{device: metadata.device, inode: metadata.inode}
+			if _, seen := hardLinks[key]; seen {
+				hardLinkDuplicates++
+				return nil
+			}
+			hardLinks[key] = struct{}{}
 		}
 		fileCount++
-		file := File{Path: path, Size: info.Size(), Kind: classify(path), ModifiedAt: info.ModTime().UnixNano()}
-		files = append(files, file)
-		if len(files) >= candidateLimit*2 {
-			files = pruneCandidates(files, candidateLimit)
+		file := File{
+			Path:           path,
+			AllocatedBytes: metadata.allocatedBytes,
+			ApparentBytes:  metadata.apparentBytes,
+			Kind:           classify(path),
+			ModifiedAt:     metadata.modifiedAt,
 		}
-		for parent := filepath.Dir(path); parent != "." && strings.HasPrefix(parent, root); parent = filepath.Dir(parent) {
-			directorySizes[parent] += info.Size()
+		largest.add(file)
+		recent.add(file)
+		for parent := filepath.Dir(path); parent != "." && pathWithin(root, parent); parent = filepath.Dir(parent) {
+			directories.add(parent, metadata.allocatedBytes, metadata.apparentBytes)
 			if parent == root {
 				break
 			}
@@ -125,25 +196,30 @@ func Scan(root string, device uint64, maxDepth, limit int) ([]File, []Directory,
 		return nil
 	})
 	if err != nil {
-		return nil, nil, warnings, err
+		return nil, nil, warnings.result(), err
 	}
-	files = pruneCandidates(files, candidateLimit)
+
+	files := mergeCandidates(largest.files(), recent.files(), candidateLimit)
 	if fileCount > len(files) {
-		warnings = append(warnings, fmt.Sprintf("growth sampling selected %d candidates from %d regular files; largest and recently modified files were prioritized", len(files), fileCount))
+		warnings.add(fmt.Sprintf("growth sampling selected %d candidates from %d regular files; largest and recently modified files were prioritized", len(files), fileCount))
 	}
-	sort.Slice(files, func(i, j int) bool { return files[i].Size > files[j].Size })
-	directories := make([]Directory, 0, len(directorySizes))
-	for path, size := range directorySizes {
-		directories = append(directories, Directory{Path: path, Size: size})
+	if hardLinkDuplicates > 0 {
+		warnings.add(fmt.Sprintf("ignored %d duplicate hard-link path(s) so allocated bytes are counted once", hardLinkDuplicates))
 	}
-	sort.Slice(directories, func(i, j int) bool { return directories[i].Size > directories[j].Size })
-	if len(directories) > limit {
-		directories = directories[:limit]
+	if directories.approximate {
+		warnings.add(fmt.Sprintf("directory totals use bounded heavy-hitter estimates after more than %d directories", candidateLimit))
 	}
-	return files, directories, warnings, nil
+	sort.Slice(files, func(i, j int) bool { return files[i].AllocatedBytes > files[j].AllocatedBytes })
+	return files, directories.result(limit), warnings.result(), nil
 }
 
 func scanCandidateLimit(reportLimit int) int {
+	if reportLimit <= 0 {
+		return 0
+	}
+	if reportLimit >= MaxReportFiles {
+		return 50000
+	}
 	limit := reportLimit * 50
 	if limit < 1000 {
 		limit = 1000
@@ -157,23 +233,45 @@ func scanCandidateLimit(reportLimit int) int {
 	return limit
 }
 
+func mergeCandidates(largest, recent []File, limit int) []File {
+	files := make([]File, 0, len(largest)+len(recent))
+	seen := make(map[string]struct{}, len(largest)+len(recent))
+	for _, group := range [][]File{largest, recent} {
+		for _, file := range group {
+			if _, found := seen[file.Path]; found {
+				continue
+			}
+			seen[file.Path] = struct{}{}
+			files = append(files, file)
+		}
+	}
+	return pruneCandidates(files, limit)
+}
+
 func pruneCandidates(files []File, limit int) []File {
+	if limit <= 0 {
+		return nil
+	}
 	if len(files) <= limit {
 		return files
 	}
 	bySize := append([]File(nil), files...)
-	sort.Slice(bySize, func(i, j int) bool { return bySize[i].Size > bySize[j].Size })
+	sort.Slice(bySize, func(i, j int) bool { return bySize[i].AllocatedBytes > bySize[j].AllocatedBytes })
 	byModified := append([]File(nil), files...)
 	sort.Slice(byModified, func(i, j int) bool { return byModified[i].ModifiedAt > byModified[j].ModifiedAt })
 	result := make([]File, 0, limit)
-	seen := make(map[string]bool, limit)
+	seen := make(map[string]struct{}, limit)
 	keep := func(file File) {
-		if len(result) < limit && !seen[file.Path] {
-			seen[file.Path] = true
-			result = append(result, file)
+		if len(result) >= limit {
+			return
 		}
+		if _, found := seen[file.Path]; found {
+			return
+		}
+		seen[file.Path] = struct{}{}
+		result = append(result, file)
 	}
-	for index := 0; index < limit/2; index++ {
+	for index := 0; index < (limit+1)/2 && index < len(bySize); index++ {
 		keep(bySize[index])
 	}
 	for _, file := range byModified {
@@ -187,7 +285,7 @@ func pruneCandidates(files []File, limit int) []File {
 
 func SelectReportFiles(files []File, limit int) ([]File, []File) {
 	largest := append([]File(nil), files...)
-	sort.Slice(largest, func(i, j int) bool { return largest[i].Size > largest[j].Size })
+	sort.Slice(largest, func(i, j int) bool { return largest[i].AllocatedBytes > largest[j].AllocatedBytes })
 	if len(largest) > limit {
 		largest = largest[:limit]
 	}
@@ -219,12 +317,12 @@ func MeasureGrowthGroups(groups [][]File, interval time.Duration) error {
 	if fileCount == 0 {
 		return nil
 	}
-	before := make(map[string]int64, fileCount)
+	before := make(map[string]fileMetadata, fileCount)
 	for _, files := range groups {
 		for _, file := range files {
-			info, err := os.Stat(file.Path)
+			metadata, err := metadataForPath(file.Path)
 			if err == nil {
-				before[file.Path] = info.Size()
+				before[file.Path] = metadata
 			}
 		}
 	}
@@ -232,20 +330,21 @@ func MeasureGrowthGroups(groups [][]File, interval time.Duration) error {
 	seconds := interval.Seconds()
 	for _, files := range groups {
 		for index := range files {
-			initialSize, found := before[files[index].Path]
+			initial, found := before[files[index].Path]
 			if !found {
 				continue
 			}
-			info, err := os.Stat(files[index].Path)
+			current, err := metadataForPath(files[index].Path)
 			if err != nil {
 				continue
 			}
-			files[index].Growth = float64(info.Size()-initialSize) / seconds
-			files[index].Size = info.Size()
+			files[index].Growth = float64(current.allocatedBytes-initial.allocatedBytes) / seconds
+			files[index].AllocatedBytes = current.allocatedBytes
+			files[index].ApparentBytes = current.apparentBytes
 		}
 		sort.Slice(files, func(i, j int) bool {
 			if files[i].Growth == files[j].Growth {
-				return files[i].Size > files[j].Size
+				return files[i].AllocatedBytes > files[j].AllocatedBytes
 			}
 			return files[i].Growth > files[j].Growth
 		})
@@ -262,16 +361,43 @@ func UpdateTrend(files []File, filesystem *Filesystem) {
 	}
 	filesystem.GrowthBytesPerSecond = growth
 	if growth > 0 {
-		filesystem.FullInSeconds = float64(filesystem.FreeBytes) / growth
+		filesystem.FullInSeconds = float64(filesystem.AvailableBytes) / growth
 	}
 }
 
-func deviceOf(path string) (uint64, error) {
+func metadataForPath(path string) (fileMetadata, error) {
 	info, err := os.Stat(path)
+	if err != nil {
+		return fileMetadata{}, err
+	}
+	return metadataFromInfo(info)
+}
+
+func metadataFromInfo(info os.FileInfo) (fileMetadata, error) {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fileMetadata{}, fmt.Errorf("unsupported file metadata type %T", info.Sys())
+	}
+	allocated := stat.Blocks * 512
+	if allocated < 0 {
+		allocated = 0
+	}
+	return fileMetadata{
+		device:         uint64(stat.Dev),
+		inode:          uint64(stat.Ino),
+		links:          uint64(stat.Nlink),
+		allocatedBytes: allocated,
+		apparentBytes:  info.Size(),
+		modifiedAt:     info.ModTime().UnixNano(),
+	}, nil
+}
+
+func deviceOf(path string) (uint64, error) {
+	metadata, err := metadataForPath(path)
 	if err != nil {
 		return 0, err
 	}
-	return uint64(info.Sys().(*syscall.Stat_t).Dev), nil
+	return metadata.device, nil
 }
 
 func classify(path string) string {
@@ -300,6 +426,11 @@ func isPseudoFilesystem(path string) bool {
 	return false
 }
 
+func pathWithin(root, path string) bool {
+	relative, err := filepath.Rel(root, path)
+	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(os.PathSeparator))
+}
+
 func depth(root, path string) int {
 	relative, err := filepath.Rel(root, path)
 	if err != nil || relative == "." {
@@ -313,4 +444,155 @@ func percent(value, total uint64) float64 {
 		return 0
 	}
 	return float64(value) * 100 / float64(total)
+}
+
+type fileHeap struct {
+	items []File
+	limit int
+	less  func(File, File) bool
+}
+
+func newFileHeap(limit int, less func(File, File) bool) *fileHeap {
+	result := &fileHeap{limit: limit, less: less}
+	heap.Init(result)
+	return result
+}
+
+func (items fileHeap) Len() int           { return len(items.items) }
+func (items fileHeap) Less(i, j int) bool { return items.less(items.items[i], items.items[j]) }
+func (items fileHeap) Swap(i, j int)      { items.items[i], items.items[j] = items.items[j], items.items[i] }
+func (items *fileHeap) Push(value any)    { items.items = append(items.items, value.(File)) }
+func (items *fileHeap) Pop() any {
+	last := len(items.items) - 1
+	value := items.items[last]
+	items.items = items.items[:last]
+	return value
+}
+
+func (items *fileHeap) add(file File) {
+	if items.limit <= 0 {
+		return
+	}
+	if items.Len() < items.limit {
+		heap.Push(items, file)
+		return
+	}
+	if items.less(items.items[0], file) {
+		items.items[0] = file
+		heap.Fix(items, 0)
+	}
+}
+
+func (items *fileHeap) files() []File { return append([]File(nil), items.items...) }
+
+func lessAllocated(left, right File) bool { return left.AllocatedBytes < right.AllocatedBytes }
+func lessModified(left, right File) bool  { return left.ModifiedAt < right.ModifiedAt }
+
+type trackedDirectory struct {
+	Directory
+	index int
+}
+
+type directoryHeap []*trackedDirectory
+
+func (items directoryHeap) Len() int { return len(items) }
+func (items directoryHeap) Less(i, j int) bool {
+	return items[i].AllocatedBytes < items[j].AllocatedBytes
+}
+func (items directoryHeap) Swap(i, j int) {
+	items[i], items[j] = items[j], items[i]
+	items[i].index = i
+	items[j].index = j
+}
+func (items *directoryHeap) Push(value any) {
+	item := value.(*trackedDirectory)
+	item.index = len(*items)
+	*items = append(*items, item)
+}
+func (items *directoryHeap) Pop() any {
+	old := *items
+	last := len(old) - 1
+	item := old[last]
+	item.index = -1
+	*items = old[:last]
+	return item
+}
+
+type directoryTracker struct {
+	limit       int
+	items       directoryHeap
+	byPath      map[string]*trackedDirectory
+	approximate bool
+}
+
+func newDirectoryTracker(limit int) *directoryTracker {
+	tracker := &directoryTracker{limit: limit, byPath: make(map[string]*trackedDirectory, limit)}
+	heap.Init(&tracker.items)
+	return tracker
+}
+
+func (tracker *directoryTracker) add(path string, allocatedBytes, apparentBytes int64) {
+	if tracker.limit <= 0 {
+		return
+	}
+	if item, found := tracker.byPath[path]; found {
+		item.AllocatedBytes += allocatedBytes
+		item.ApparentBytes += apparentBytes
+		heap.Fix(&tracker.items, item.index)
+		return
+	}
+	if len(tracker.items) < tracker.limit {
+		item := &trackedDirectory{Directory: Directory{Path: path, AllocatedBytes: allocatedBytes, ApparentBytes: apparentBytes}}
+		heap.Push(&tracker.items, item)
+		tracker.byPath[path] = item
+		return
+	}
+	minimum := tracker.items[0]
+	delete(tracker.byPath, minimum.Path)
+	minimum.Path = path
+	minimum.AllocatedBytes += allocatedBytes
+	minimum.ApparentBytes += apparentBytes
+	minimum.Estimated = true
+	tracker.byPath[path] = minimum
+	heap.Fix(&tracker.items, 0)
+	tracker.approximate = true
+}
+
+func (tracker *directoryTracker) result(limit int) []Directory {
+	if limit <= 0 {
+		return nil
+	}
+	result := make([]Directory, 0, len(tracker.items))
+	for _, item := range tracker.items {
+		result = append(result, item.Directory)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].AllocatedBytes > result[j].AllocatedBytes })
+	if len(result) > limit {
+		result = result[:limit]
+	}
+	return result
+}
+
+type warningCollector struct {
+	limit   int
+	items   []string
+	omitted int
+}
+
+func newWarningCollector(limit int) *warningCollector { return &warningCollector{limit: limit} }
+
+func (warnings *warningCollector) add(message string) {
+	if len(warnings.items) < warnings.limit {
+		warnings.items = append(warnings.items, message)
+		return
+	}
+	warnings.omitted++
+}
+
+func (warnings *warningCollector) result() []string {
+	result := append([]string(nil), warnings.items...)
+	if warnings.omitted > 0 {
+		result = append(result, fmt.Sprintf("%d additional scan warning(s) omitted", warnings.omitted))
+	}
+	return result
 }

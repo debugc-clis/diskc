@@ -14,11 +14,14 @@ import (
 )
 
 type DeletedFile struct {
-	Path    string        `json:"path"`
-	Size    int64         `json:"size_bytes"`
-	Writers []disk.Writer `json:"writers"`
-	Device  uint64        `json:"-"`
+	Path           string        `json:"path"`
+	AllocatedBytes int64         `json:"allocated_bytes"`
+	ApparentBytes  int64         `json:"apparent_bytes"`
+	Writers        []disk.Writer `json:"writers"`
+	Device         uint64        `json:"-"`
 }
+
+var procRoot = "/proc"
 
 func AttributeWriters(files []disk.File) {
 	byIdentity := make(map[identity][]int)
@@ -28,7 +31,7 @@ func AttributeWriters(files []disk.File) {
 			byIdentity[id] = append(byIdentity[id], index)
 		}
 	}
-	entries, err := os.ReadDir("/proc")
+	entries, err := os.ReadDir(procRoot)
 	if err != nil {
 		return
 	}
@@ -38,7 +41,7 @@ func AttributeWriters(files []disk.File) {
 		if err != nil || !entry.IsDir() {
 			continue
 		}
-		fds, err := os.ReadDir(filepath.Join("/proc", entry.Name(), "fd"))
+		fds, err := os.ReadDir(filepath.Join(procRoot, entry.Name(), "fd"))
 		if err != nil {
 			continue
 		}
@@ -46,7 +49,7 @@ func AttributeWriters(files []disk.File) {
 			if !writableDescriptor(pid, fd.Name()) {
 				continue
 			}
-			id, err := fileIdentity(filepath.Join("/proc", entry.Name(), "fd", fd.Name()))
+			id, err := fileIdentity(filepath.Join(procRoot, entry.Name(), "fd", fd.Name()))
 			if err != nil {
 				continue
 			}
@@ -65,11 +68,11 @@ func AttributeWriters(files []disk.File) {
 
 func DeletedFiles() []DeletedFile {
 	type retained struct {
-		file DeletedFile
-		id   identity
+		file    DeletedFile
+		writers map[int]struct{}
 	}
 	files := make(map[identity]*retained)
-	entries, err := os.ReadDir("/proc")
+	entries, err := os.ReadDir(procRoot)
 	if err != nil {
 		return nil
 	}
@@ -78,13 +81,13 @@ func DeletedFiles() []DeletedFile {
 		if err != nil || !entry.IsDir() {
 			continue
 		}
-		fds, err := os.ReadDir(filepath.Join("/proc", entry.Name(), "fd"))
+		fds, err := os.ReadDir(filepath.Join(procRoot, entry.Name(), "fd"))
 		if err != nil {
 			continue
 		}
 		writer := writerInfo(pid)
 		for _, fd := range fds {
-			fdPath := filepath.Join("/proc", entry.Name(), "fd", fd.Name())
+			fdPath := filepath.Join(procRoot, entry.Name(), "fd", fd.Name())
 			target, err := os.Readlink(fdPath)
 			if err != nil || !strings.HasSuffix(target, " (deleted)") {
 				continue
@@ -99,17 +102,36 @@ func DeletedFiles() []DeletedFile {
 				if statErr != nil {
 					continue
 				}
-				item = &retained{file: DeletedFile{Path: strings.TrimSuffix(target, " (deleted)"), Size: info.Size(), Device: id.device}}
+				stat, ok := info.Sys().(*syscall.Stat_t)
+				if !ok {
+					continue
+				}
+				allocatedBytes := stat.Blocks * 512
+				if allocatedBytes < 0 {
+					allocatedBytes = 0
+				}
+				item = &retained{
+					file: DeletedFile{
+						Path:           strings.TrimSuffix(target, " (deleted)"),
+						AllocatedBytes: allocatedBytes,
+						ApparentBytes:  info.Size(),
+						Device:         id.device,
+					},
+					writers: make(map[int]struct{}),
+				}
 				files[id] = item
 			}
-			item.file.Writers = append(item.file.Writers, writer)
+			if _, found := item.writers[pid]; !found {
+				item.file.Writers = append(item.file.Writers, writer)
+				item.writers[pid] = struct{}{}
+			}
 		}
 	}
 	result := make([]DeletedFile, 0, len(files))
 	for _, item := range files {
 		result = append(result, item.file)
 	}
-	sort.Slice(result, func(i, j int) bool { return result[i].Size > result[j].Size })
+	sort.Slice(result, func(i, j int) bool { return result[i].AllocatedBytes > result[j].AllocatedBytes })
 	return result
 }
 
@@ -131,14 +153,14 @@ func fileIdentity(path string) (identity, error) {
 }
 
 func writerInfo(pid int) disk.Writer {
-	name := readFirstLine(filepath.Join("/proc", strconv.Itoa(pid), "comm"))
-	exe, _ := os.Readlink(filepath.Join("/proc", strconv.Itoa(pid), "exe"))
+	name := readFirstLine(filepath.Join(procRoot, strconv.Itoa(pid), "comm"))
+	exe, _ := os.Readlink(filepath.Join(procRoot, strconv.Itoa(pid), "exe"))
 	uid := processUID(pid)
 	return disk.Writer{PID: pid, Process: name, Exe: exe, UID: uid, Service: serviceName(pid), Container: containerID(pid)}
 }
 
 func serviceName(pid int) string {
-	file, err := os.Open(filepath.Join("/proc", strconv.Itoa(pid), "cgroup"))
+	file, err := os.Open(filepath.Join(procRoot, strconv.Itoa(pid), "cgroup"))
 	if err != nil {
 		return ""
 	}
@@ -155,7 +177,7 @@ func serviceName(pid int) string {
 }
 
 func containerID(pid int) string {
-	file, err := os.Open(filepath.Join("/proc", strconv.Itoa(pid), "cgroup"))
+	file, err := os.Open(filepath.Join(procRoot, strconv.Itoa(pid), "cgroup"))
 	if err != nil {
 		return ""
 	}
@@ -185,7 +207,7 @@ func isHex(value string) bool {
 }
 
 func writableDescriptor(pid int, fd string) bool {
-	file, err := os.Open(filepath.Join("/proc", strconv.Itoa(pid), "fdinfo", fd))
+	file, err := os.Open(filepath.Join(procRoot, strconv.Itoa(pid), "fdinfo", fd))
 	if err != nil {
 		return false
 	}
@@ -203,7 +225,7 @@ func writableDescriptor(pid int, fd string) bool {
 }
 
 func processUID(pid int) string {
-	file, err := os.Open(filepath.Join("/proc", strconv.Itoa(pid), "status"))
+	file, err := os.Open(filepath.Join(procRoot, strconv.Itoa(pid), "status"))
 	if err != nil {
 		return "?"
 	}

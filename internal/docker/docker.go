@@ -4,15 +4,18 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/user"
 	"path/filepath"
 	"sort"
 	"strings"
-	"time"
 
+	"github.com/debugc-clis/diskc/internal/cliutil"
 	"github.com/debugc-clis/diskc/internal/disk"
 	"github.com/debugc-clis/diskc/internal/proc"
+	"github.com/debugc-clis/diskc/internal/settings"
+	"github.com/debugc-clis/diskc/internal/textfmt"
 )
 
 type Report struct {
@@ -37,61 +40,113 @@ type PathReport struct {
 	Kind        string           `json:"kind"`
 	Usage       disk.Filesystem  `json:"usage"`
 	Files       []disk.File      `json:"files,omitempty"`
+	Growing     []disk.File      `json:"fastest_growing,omitempty"`
 	Directories []disk.Directory `json:"directories,omitempty"`
+	Warnings    []string         `json:"warnings,omitempty"`
+	Error       string           `json:"error,omitempty"`
+	candidates  []disk.File
 }
 
 type daemonConfig struct {
 	DataRoot string `json:"data-root"`
 }
 
-func Run(args []string) error {
+var discover = Discover
+var filesystemUsage = disk.FilesystemUsage
+var scan = disk.Scan
+var measureGrowthGroups = disk.MeasureGrowthGroups
+var attributeWriters = proc.AttributeWriters
+
+func Run(args []string, stdout, stderr io.Writer) error {
 	flags := flag.NewFlagSet("docker", flag.ContinueOnError)
-	flags.SetOutput(os.Stderr)
-	top := flags.Int("top", 20, "number of large Docker files to report per path")
-	depth := flags.Int("depth", 4, "maximum Docker directory depth to scan")
-	sample := flags.Duration("sample", 3*time.Second, "measure Docker file growth over this duration")
+	flags.SetOutput(io.Discard)
+	top := flags.Int("top", settings.Top, "number of large Docker files to report per path")
+	depth := flags.Int("depth", settings.Depth, "maximum Docker directory depth to scan")
+	sample := flags.Duration("sample", settings.Sample, "measure Docker file growth over this duration")
 	jsonOutput := flags.Bool("json", false, "emit machine-readable JSON")
+	flags.Usage = func() {
+		fmt.Fprintln(stdout, "Usage: diskc docker [--top N] [--depth N] [--sample DURATION] [--json]\n\nInspect Docker host storage without requiring daemon access.")
+		flags.SetOutput(stdout)
+		flags.PrintDefaults()
+	}
 	if err := flags.Parse(args); err != nil {
 		if err == flag.ErrHelp {
 			return nil
 		}
-		return err
+		return cliutil.Usage(err)
 	}
-	if *top < 1 || *depth < 0 || *sample < 0 {
-		return fmt.Errorf("docker: top must be positive; depth and sample must be non-negative")
+	if flags.NArg() != 0 {
+		return cliutil.Usage(fmt.Errorf("docker: unexpected argument %q", flags.Arg(0)))
 	}
-	report := Discover()
+	if *top < 1 || *top > disk.MaxReportFiles || *depth < 0 || *sample < 0 {
+		return cliutil.Usage(fmt.Errorf("docker: top must be between 1 and %d; depth and sample must be non-negative", disk.MaxReportFiles))
+	}
+	report := discover()
 	for index := range report.Paths {
 		path := &report.Paths[index]
-		usage, err := disk.FilesystemUsage(path.Path)
+		usage, err := filesystemUsage(path.Path)
 		if err != nil {
-			report.Warnings = append(report.Warnings, fmt.Sprintf("cannot inspect %s: %v", path.Path, err))
+			path.Error = fmt.Sprintf("cannot inspect: %v", err)
 			continue
 		}
-		files, directories, warnings, err := disk.Scan(path.Path, usage.Device, *depth, *top)
+		path.Usage = usage
+		files, directories, warnings, err := scan(path.Path, usage.Device, *depth, *top)
+		path.Warnings = append(path.Warnings, warnings...)
 		if err != nil {
-			report.Warnings = append(report.Warnings, warnings...)
+			path.Error = fmt.Sprintf("cannot scan: %v", err)
 			continue
 		}
-		if *sample > 0 {
-			if err := disk.MeasureGrowth(files, *sample); err != nil {
-				report.Warnings = append(report.Warnings, err.Error())
+		path.candidates = files
+		path.Directories = directories
+	}
+	groups := make([][]disk.File, 0, len(report.Paths))
+	for index := range report.Paths {
+		if report.Paths[index].Error == "" && report.Paths[index].candidates != nil {
+			groups = append(groups, report.Paths[index].candidates)
+		}
+	}
+	if err := measureGrowthGroups(groups, *sample); err != nil {
+		for index := range report.Paths {
+			if report.Paths[index].Error == "" {
+				report.Paths[index].Warnings = append(report.Paths[index].Warnings, err.Error())
 			}
 		}
-		disk.UpdateTrend(files, &usage)
-		proc.AttributeWriters(files)
-		path.Usage = usage
-		path.Files = files
-		path.Directories = directories
-		report.Warnings = append(report.Warnings, warnings...)
+	}
+	candidates := make([]disk.File, 0)
+	for index := range report.Paths {
+		path := &report.Paths[index]
+		if path.Error != "" {
+			continue
+		}
+		disk.UpdateTrend(path.candidates, &path.Usage)
+		path.Files, path.Growing = disk.SelectReportFiles(path.candidates, *top)
+		candidates = append(candidates, path.Files...)
+		candidates = append(candidates, path.Growing...)
+	}
+	attributeWriters(candidates)
+	writers := make(map[string][]disk.Writer, len(candidates))
+	for _, file := range candidates {
+		if len(file.Writers) > 0 {
+			writers[file.Path] = file.Writers
+		}
+	}
+	for index := range report.Paths {
+		attachWriters(report.Paths[index].Files, writers)
+		attachWriters(report.Paths[index].Growing, writers)
+		report.Paths[index].candidates = nil
 	}
 	if *jsonOutput {
-		encoder := json.NewEncoder(os.Stdout)
+		encoder := json.NewEncoder(stdout)
 		encoder.SetIndent("", "  ")
 		return encoder.Encode(report)
 	}
-	printReport(report)
-	return nil
+	return printReport(stdout, report)
+}
+
+func attachWriters(files []disk.File, writers map[string][]disk.Writer) {
+	for index := range files {
+		files[index].Writers = writers[files[index].Path]
+	}
 }
 
 func Discover() Report {
@@ -138,57 +193,82 @@ func Discover() Report {
 	return report
 }
 
-func printReport(report Report) {
-	fmt.Printf("Docker storage\n")
-	fmt.Printf("Runtime: %s", report.Runtime)
+func printReport(writer io.Writer, report Report) error {
+	checked := textfmt.NewWriter(writer)
+	writer = checked
+	fmt.Fprintln(writer, "Docker storage")
+	fmt.Fprintf(writer, "Runtime: %s", textfmt.Safe(report.Runtime))
 	if report.Rootless {
-		fmt.Printf(" (rootless)")
+		fmt.Fprint(writer, " (rootless)")
 	}
-	fmt.Println()
+	fmt.Fprintln(writer)
 	if report.Config != "" {
-		fmt.Printf("Config: %s\n", report.Config)
+		fmt.Fprintf(writer, "Config: %s\n", textfmt.Safe(report.Config))
 	}
 	if report.DataRoot != "" {
-		fmt.Printf("Data root: %s\n", report.DataRoot)
+		fmt.Fprintf(writer, "Data root: %s\n", textfmt.Safe(report.DataRoot))
 	}
 	if report.Socket != "" {
-		fmt.Printf("Socket: %s\n", report.Socket)
+		fmt.Fprintf(writer, "Socket: %s\n", textfmt.Safe(report.Socket))
 	}
 	if len(report.Processes) > 0 {
-		fmt.Println("Processes")
+		fmt.Fprintln(writer, "Processes")
 		for _, process := range report.Processes {
-			fmt.Printf("  PID %d  %s  %s\n", process.PID, process.Process, process.Exe)
+			fmt.Fprintf(writer, "  PID %d  %s  %s\n", process.PID, textfmt.Safe(process.Process), textfmt.Safe(process.Exe))
 		}
 	}
 	for _, path := range report.Paths {
-		fmt.Printf("\n%s: %s\n", path.Kind, path.Path)
-		fmt.Printf("  Used: %.1f%%  Inodes: %.1f%%  Free: %s\n", path.Usage.UsedPercent, path.Usage.InodePercent, formatBytes(path.Usage.FreeBytes))
+		fmt.Fprintf(writer, "\n%s: %s\n", textfmt.Safe(path.Kind), textfmt.Safe(path.Path))
+		if path.Error != "" {
+			fmt.Fprintf(writer, "  Unavailable: %s\n", textfmt.Safe(path.Error))
+			for _, warning := range path.Warnings {
+				fmt.Fprintf(writer, "  Warning: %s\n", textfmt.Safe(warning))
+			}
+			continue
+		}
+		fmt.Fprintf(writer, "  Pressure: %.1f%%  Used: %.1f%%  Inodes: %.1f%%  Available: %s\n", path.Usage.PressurePercent, path.Usage.UsedPercent, path.Usage.InodePercent, formatBytes(path.Usage.AvailableBytes))
 		if path.Usage.GrowthBytesPerSecond > 0 {
-			fmt.Printf("  Trend: +%s/hour\n", formatBytes(uint64(path.Usage.GrowthBytesPerSecond*3600)))
+			fmt.Fprintf(writer, "  Trend: +%s/hour\n", formatBytes(uint64(path.Usage.GrowthBytesPerSecond*3600)))
 		}
 		if len(path.Files) > 0 {
-			fmt.Println("  Largest files")
+			fmt.Fprintln(writer, "  Largest files")
 			for _, file := range path.Files {
-				growth := ""
-				if file.Growth != 0 {
-					growth = fmt.Sprintf("  ↑ %s/s", formatBytes(uint64(abs(file.Growth))))
-				}
-				fmt.Printf("    %10s  %s%s\n", formatBytes(uint64(file.Size)), file.Path, growth)
+				fmt.Fprintf(writer, "    %10s  %s%s\n", formatBytes(uint64(file.AllocatedBytes)), textfmt.Safe(file.Path), growth(file.Growth))
+			}
+		}
+		if len(path.Growing) > 0 {
+			fmt.Fprintln(writer, "  Fastest growth")
+			for _, file := range path.Growing {
+				fmt.Fprintf(writer, "    %10s/s  %s\n", formatBytes(uint64(file.Growth)), textfmt.Safe(file.Path))
 			}
 		}
 		if len(path.Directories) > 0 {
-			fmt.Println("  Largest directories")
+			fmt.Fprintln(writer, "  Largest directories")
 			for _, directory := range path.Directories[:min(5, len(path.Directories))] {
-				fmt.Printf("    %10s  %s\n", formatBytes(uint64(directory.Size)), directory.Path)
+				fmt.Fprintf(writer, "    %10s  %s\n", formatBytes(uint64(directory.AllocatedBytes)), textfmt.Safe(directory.Path))
 			}
+		}
+		for _, warning := range path.Warnings {
+			fmt.Fprintf(writer, "  Warning: %s\n", textfmt.Safe(warning))
 		}
 	}
 	if len(report.Paths) == 0 {
-		fmt.Println("No Docker storage paths found.")
+		fmt.Fprintln(writer, "No Docker storage paths found.")
 	}
 	for _, warning := range report.Warnings {
-		fmt.Printf("Warning: %s\n", warning)
+		fmt.Fprintf(writer, "Warning: %s\n", textfmt.Safe(warning))
 	}
+	return checked.Err()
+}
+
+func growth(value float64) string {
+	if value > 0 {
+		return fmt.Sprintf("  ↑ %s/s", formatBytes(uint64(value)))
+	}
+	if value < 0 {
+		return fmt.Sprintf("  ↓ %s/s", formatBytes(uint64(-value)))
+	}
+	return ""
 }
 
 func readConfig(path string) (daemonConfig, error) {
@@ -296,11 +376,4 @@ func formatBytes(value uint64) string {
 		return fmt.Sprintf("%d B", value)
 	}
 	return fmt.Sprintf("%.1f %s", number, units[unit])
-}
-
-func abs(value float64) float64 {
-	if value < 0 {
-		return -value
-	}
-	return value
 }

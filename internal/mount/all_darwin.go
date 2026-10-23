@@ -9,6 +9,31 @@ import (
 )
 
 func All() ([]string, error) {
+	mounts, err := readDarwinMounts()
+	if err != nil {
+		return nil, err
+	}
+	paths := make([]string, 0, len(mounts))
+	for _, mount := range mounts {
+		if mount.Kind == KindRemote {
+			continue
+		}
+		paths = append(paths, mount.Path)
+	}
+	sort.Strings(paths)
+	return paths, nil
+}
+
+func List() ([]Info, error) {
+	mounts, err := readDarwinMounts()
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(mounts, func(i, j int) bool { return mounts[i].Path < mounts[j].Path })
+	return mounts, nil
+}
+
+func readDarwinMounts() ([]Info, error) {
 	const mntNowait = 2
 	count, err := syscall.Getfsstat(nil, mntNowait)
 	if err != nil {
@@ -19,19 +44,33 @@ func All() ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	if count > len(stats) {
+		count = len(stats)
+	}
 	seen := make(map[string]bool)
-	paths := make([]string, 0, count)
+	mounts := make([]Info, 0, count)
 	for _, stat := range stats[:count] {
 		filesystemType := int8String(stat.Fstypename[:])
+		kind := Classify(filesystemType)
 		path := int8String(stat.Mntonname[:])
-		if path == "" || virtualFilesystems[filesystemType] || strings.HasPrefix(path, "/Library/Developer/CoreSimulator/") || seen[path] {
+		if path == "" || kind == KindPseudo || kind == KindMemory || darwinInternalMount(path) || strings.HasPrefix(path, "/Library/Developer/CoreSimulator/") || seen[path] {
 			continue
 		}
 		seen[path] = true
-		paths = append(paths, path)
+		mounts = append(mounts, Info{
+			Source:   int8String(stat.Mntfromname[:]),
+			Path:     path,
+			Type:     filesystemType,
+			Kind:     kind,
+			ReadOnly: stat.Flags&1 != 0,
+			identity: path,
+		})
 	}
-	sort.Strings(paths)
-	return paths, nil
+	return mounts, nil
+}
+
+func darwinInternalMount(path string) bool {
+	return strings.HasPrefix(path, "/System/Volumes/") && path != "/System/Volumes/Data"
 }
 
 func int8String(value []int8) string {
