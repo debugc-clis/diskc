@@ -76,6 +76,10 @@ Maximum directory depth to scan. Default: 4.
 .TP
 .BI --sample " DURATION"
 Growth measurement window. Default: 3s. Use 0 to disable.
+.PP
+Filesystem growth and time-to-full use net available-byte loss during this
+window, including activity outside scanned candidates. Per-file growth is
+attribution only; zero or negative net growth has no time-to-full estimate.
 .TP
 .B --all
 Inspect all automatically discovered local filesystems.

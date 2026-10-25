@@ -44,7 +44,7 @@ Running `diskc` with no arguments:
 5. Separately reports the largest and fastest-growing files.
 6. Maps writable Linux file descriptors to their processes.
 7. Detects deleted-but-open Linux files that still retain allocated blocks.
-8. Estimates time-to-full from positive observed growth and user-available space.
+8. Estimates time-to-full from net filesystem available-byte loss during the sampling window; per-file growth identifies contributors. JSON labels the basis as `filesystem_available_bytes`.
 9. Adds Linux mount, I/O pressure, RAID, overlay, and copy-on-write findings when available.
 
 Hard links are counted once per scan. Sparse files retain their apparent length in JSON and text annotations but are ranked by the blocks they actually consume.
@@ -56,8 +56,8 @@ $ diskc
 Disk pressure: WARNING  92.4% unavailable (38.0 GB available, 42.0 GB free)
 Filesystem usage: 91.6% used  |  4.0 GB reserved
 Inodes: 41.0% used  |  /
-Observed growth: +65.5 GB/hour
-Estimated full at observed growth: ~35 minutes
+Filesystem net growth: +65.5 GB/hour
+Estimated full at net growth: ~35 minutes
 
 Largest files
    74.8 GB  /var/log/payment/app.log  (log)  ↑ 18.2 MB/s  [1 writer(s)]
@@ -289,7 +289,7 @@ man ./docs/diskc.1
 
 - `diskc` is diagnostic and read-only. It does not delete, truncate, restart, kill, or modify anything.
 - Run it as the affected service user when practical. Filesystem and Linux `/proc` permissions may hide files or processes owned by other users.
-- Time-to-full is an estimate based on positive allocated-block growth observed during a short sample; bursty workloads and block allocation granularity can change the result.
+- Time-to-full uses net filesystem available-byte loss during the short sample, including activity outside scanned candidates. Recovery or deletion can offset growth; zero or negative net growth has no time-to-full estimate. Bursty workloads and block allocation granularity can change the result.
 - Database files, Docker data, macOS system files, and application support data must not be deleted solely because they appear in a report.
 - Copy-on-write, snapshots, compression, reflinks, quotas, and thin provisioning can make filesystem totals differ from ordinary file sums.
 - `diskc` does not replace filesystem-specific snapshot, quota, SMART, NVMe, or vendor database tools.

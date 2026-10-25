@@ -28,6 +28,7 @@ type Filesystem struct {
 	PressurePercent      float64 `json:"pressure_percent"`
 	InodePercent         float64 `json:"inode_percent"`
 	GrowthBytesPerSecond float64 `json:"growth_bytes_per_second,omitempty"`
+	GrowthBasis          string  `json:"growth_basis,omitempty"`
 	FullInSeconds        float64 `json:"full_in_seconds,omitempty"`
 }
 
@@ -307,6 +308,12 @@ func MeasureGrowth(files []File, interval time.Duration) error {
 }
 
 func MeasureGrowthGroups(groups [][]File, interval time.Duration) error {
+	return MeasureGrowthGroupsWithFilesystems(groups, nil, interval)
+}
+
+var sampleFilesystemUsage = FilesystemUsage
+
+func MeasureGrowthGroupsWithFilesystems(groups [][]File, filesystems []*Filesystem, interval time.Duration) error {
 	if interval <= 0 {
 		return nil
 	}
@@ -314,7 +321,7 @@ func MeasureGrowthGroups(groups [][]File, interval time.Duration) error {
 	for _, files := range groups {
 		fileCount += len(files)
 	}
-	if fileCount == 0 {
+	if fileCount == 0 && len(filesystems) == 0 {
 		return nil
 	}
 	before := make(map[string]fileMetadata, fileCount)
@@ -326,8 +333,38 @@ func MeasureGrowthGroups(groups [][]File, interval time.Duration) error {
 			}
 		}
 	}
+	initialUsage := make(map[uint64]uint64, len(filesystems))
+	for _, filesystem := range filesystems {
+		if _, found := initialUsage[filesystem.Device]; found {
+			continue
+		}
+		usage, err := sampleFilesystemUsage(filesystem.Path)
+		if err != nil {
+			return err
+		}
+		initialUsage[filesystem.Device] = usage.AvailableBytes
+	}
+	started := time.Now()
 	time.Sleep(interval)
-	seconds := interval.Seconds()
+	seconds := time.Since(started).Seconds()
+	finalUsage := make(map[uint64]Filesystem, len(filesystems))
+	for _, filesystem := range filesystems {
+		if _, found := finalUsage[filesystem.Device]; found {
+			continue
+		}
+		usage, err := sampleFilesystemUsage(filesystem.Path)
+		if err != nil {
+			return err
+		}
+		finalUsage[filesystem.Device] = usage
+	}
+	for _, filesystem := range filesystems {
+		usage := finalUsage[filesystem.Device]
+		growth := (float64(initialUsage[filesystem.Device]) - float64(usage.AvailableBytes)) / seconds
+		usage.Path = filesystem.Path
+		*filesystem = usage
+		UpdateTrend(growth, filesystem)
+	}
 	for _, files := range groups {
 		for index := range files {
 			initial, found := before[files[index].Path]
@@ -352,14 +389,10 @@ func MeasureGrowthGroups(groups [][]File, interval time.Duration) error {
 	return nil
 }
 
-func UpdateTrend(files []File, filesystem *Filesystem) {
-	var growth float64
-	for _, file := range files {
-		if file.Growth > 0 {
-			growth += file.Growth
-		}
-	}
+func UpdateTrend(growth float64, filesystem *Filesystem) {
 	filesystem.GrowthBytesPerSecond = growth
+	filesystem.GrowthBasis = "filesystem_available_bytes"
+	filesystem.FullInSeconds = 0
 	if growth > 0 {
 		filesystem.FullInSeconds = float64(filesystem.AvailableBytes) / growth
 	}

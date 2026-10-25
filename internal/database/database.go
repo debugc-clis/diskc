@@ -64,7 +64,7 @@ var definitions = []definition{
 var discover = Discover
 var filesystemUsage = disk.FilesystemUsage
 var scan = disk.Scan
-var measureGrowthGroups = disk.MeasureGrowthGroups
+var measureGrowthGroups = disk.MeasureGrowthGroupsWithFilesystems
 var attributeWriters = proc.AttributeWriters
 
 func Run(args []string, stdout, stderr io.Writer) error {
@@ -135,10 +135,12 @@ func inspect(instances []Instance, top, depth int, sample time.Duration) {
 		}
 	}
 	groups := make([][]disk.File, 0, len(refs))
+	filesystems := make([]*disk.Filesystem, 0, len(refs))
 	for _, ref := range refs {
 		groups = append(groups, instances[ref.instance].Filesystems[ref.index].candidates)
+		filesystems = append(filesystems, &instances[ref.instance].Filesystems[ref.index].Usage)
 	}
-	if err := measureGrowthGroups(groups, sample); err != nil {
+	if err := measureGrowthGroups(groups, filesystems, sample); err != nil {
 		for _, ref := range refs {
 			filesystem := &instances[ref.instance].Filesystems[ref.index]
 			filesystem.Warnings = append(filesystem.Warnings, err.Error())
@@ -147,7 +149,6 @@ func inspect(instances []Instance, top, depth int, sample time.Duration) {
 	candidates := make([]disk.File, 0)
 	for _, ref := range refs {
 		filesystem := &instances[ref.instance].Filesystems[ref.index]
-		disk.UpdateTrend(filesystem.candidates, &filesystem.Usage)
 		filesystem.Files, filesystem.Growing = disk.SelectReportFiles(filesystem.candidates, top)
 		candidates = append(candidates, filesystem.Files...)
 		candidates = append(candidates, filesystem.Growing...)
@@ -229,7 +230,7 @@ func Print(writer io.Writer, data []Instance, jsonOutput bool) error {
 			}
 			fmt.Fprintf(writer, "  Pressure: %.1f%%  Used: %.1f%%  Inodes: %.1f%%  Available: %s\n", filesystem.Usage.PressurePercent, filesystem.Usage.UsedPercent, filesystem.Usage.InodePercent, formatBytes(filesystem.Usage.AvailableBytes))
 			if filesystem.Usage.GrowthBytesPerSecond > 0 {
-				fmt.Fprintf(writer, "  Trend: +%s/hour\n", formatBytes(uint64(filesystem.Usage.GrowthBytesPerSecond*3600)))
+				fmt.Fprintf(writer, "  Filesystem net trend: +%s/hour\n", formatBytes(uint64(filesystem.Usage.GrowthBytesPerSecond*3600)))
 			}
 			for _, file := range filesystem.Files {
 				fmt.Fprintf(writer, "  %10s  %s%s\n", formatBytes(uint64(file.AllocatedBytes)), textfmt.Safe(file.Path), growth(file.Growth))

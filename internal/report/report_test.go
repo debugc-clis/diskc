@@ -41,6 +41,42 @@ func TestPrintIncludesGrowthAndDiagnostics(t *testing.T) {
 	}
 }
 
+func TestNetGrowthOutputAndJSON(t *testing.T) {
+	data := Data{Filesystem: disk.Filesystem{Path: "/", AvailableBytes: 1000, GrowthBytesPerSecond: -100}, Growing: []disk.File{{Path: "/growing", Growth: 200}}}
+	var output bytes.Buffer
+	if err := Print(&output, data, false); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(output.String(), "Filesystem net growth:") || strings.Contains(output.String(), "Estimated full") || !strings.Contains(output.String(), "Fastest growth") {
+		t.Fatalf("unexpected text: %s", output.String())
+	}
+	output.Reset()
+	if err := Print(&output, data, true); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), `"growth_bytes_per_second": -100`) || strings.Contains(output.String(), `"full_in_seconds"`) || !strings.Contains(output.String(), `"fastest_growing"`) {
+		t.Fatalf("unexpected JSON: %s", output.String())
+	}
+}
+
+func TestPositiveNetGrowthShowsForecastBasis(t *testing.T) {
+	data := Data{Filesystem: disk.Filesystem{Path: "/", AvailableBytes: 1000, GrowthBytesPerSecond: 100, GrowthBasis: "filesystem_available_bytes", FullInSeconds: 10}}
+	var output bytes.Buffer
+	if err := Print(&output, data, false); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "Filesystem net growth:") || !strings.Contains(output.String(), "Estimated full at net growth:") {
+		t.Fatalf("missing net growth label: %s", output.String())
+	}
+	output.Reset()
+	if err := Print(&output, data, true); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), `"growth_basis": "filesystem_available_bytes"`) {
+		t.Fatalf("missing JSON growth basis: %s", output.String())
+	}
+}
+
 func TestPrintSummarizesWarningsAndShowsShrinkage(t *testing.T) {
 	var output bytes.Buffer
 	warnings := []string{"one", "two", "three", "four", "five", "six", "seven"}

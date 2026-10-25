@@ -239,13 +239,15 @@ func refresh(writer, stderr io.Writer, roots []string, config scanConfig) error 
 		return fmt.Errorf("no filesystems could be inspected")
 	}
 	groups := make([][]disk.File, len(targets))
+	filesystems := make([]*disk.Filesystem, len(targets))
 	for index := range targets {
 		groups[index] = targets[index].files
+		filesystems[index] = &targets[index].filesystem
 		if config.sample > 0 {
 			targets[index].health = health.TakeSnapshot(targets[index].filesystem.Device)
 		}
 	}
-	if err := disk.MeasureGrowthGroups(groups, config.sample); err != nil {
+	if err := disk.MeasureGrowthGroupsWithFilesystems(groups, filesystems, config.sample); err != nil {
 		for index := range targets {
 			targets[index].warnings = append(targets[index].warnings, err.Error())
 		}
@@ -261,7 +263,6 @@ func refresh(writer, stderr io.Writer, roots []string, config scanConfig) error 
 	hostFindings := health.HostFindings()
 	for index := range targets {
 		target := &targets[index]
-		disk.UpdateTrend(target.files, &target.filesystem)
 		largest, growing := disk.SelectReportFiles(target.files, config.top)
 		if config.inspectProcesses {
 			candidates = append(candidates, largest...)

@@ -203,9 +203,69 @@ func TestScanCountsHardLinksOnce(t *testing.T) {
 
 func TestUpdateTrendUsesAvailableCapacity(t *testing.T) {
 	filesystem := Filesystem{FreeBytes: 10_000, AvailableBytes: 1_000}
-	UpdateTrend([]File{{Growth: 100}}, &filesystem)
+	UpdateTrend(100, &filesystem)
 	if filesystem.FullInSeconds != 10 {
 		t.Fatalf("expected ETA from available bytes, got %+v", filesystem)
+	}
+}
+
+func TestUpdateTrendNetRates(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		rate float64
+		eta  float64
+	}{
+		{"net growth", 200, 5},
+		{"net recovery", -200, 0},
+		{"zero", 0, 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			filesystem := Filesystem{AvailableBytes: 1000, FullInSeconds: 99}
+			UpdateTrend(test.rate, &filesystem)
+			if filesystem.GrowthBytesPerSecond != test.rate || filesystem.FullInSeconds != test.eta {
+				t.Fatalf("unexpected trend: %+v", filesystem)
+			}
+		})
+	}
+}
+
+func TestMeasureGrowthGroupsWithFilesystemsSharesDevice(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		final     uint64
+		isGrowing bool
+	}{
+		{name: "growth outside candidate set", final: 800, isGrowing: true},
+		{name: "net recovery", final: 1200},
+		{name: "no net change", final: 1000},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			original := sampleFilesystemUsage
+			t.Cleanup(func() { sampleFilesystemUsage = original })
+			calls := 0
+			sampleFilesystemUsage = func(path string) (Filesystem, error) {
+				calls++
+				available := uint64(1000)
+				if calls == 2 {
+					available = test.final
+				}
+				return Filesystem{Path: path, Device: 7, AvailableBytes: available}, nil
+			}
+			first := Filesystem{Path: "/first", Device: 7}
+			second := Filesystem{Path: "/first/nested", Device: 7}
+			if err := MeasureGrowthGroupsWithFilesystems(nil, []*Filesystem{&first, &second}, time.Millisecond); err != nil {
+				t.Fatal(err)
+			}
+			if calls != 2 || first.GrowthBytesPerSecond != second.GrowthBytesPerSecond || first.AvailableBytes != second.AvailableBytes {
+				t.Fatalf("expected one shared device sample: calls=%d first=%+v second=%+v", calls, first, second)
+			}
+			if (first.GrowthBytesPerSecond > 0) != test.isGrowing || (first.FullInSeconds > 0) != test.isGrowing {
+				t.Fatalf("incorrect net growth or ETA: %+v", first)
+			}
+			if first.GrowthBasis != "filesystem_available_bytes" || second.Path != "/first/nested" {
+				t.Fatalf("sample basis or path lost: %+v %+v", first, second)
+			}
+		})
 	}
 }
 

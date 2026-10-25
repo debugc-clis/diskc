@@ -80,9 +80,9 @@ func text(writer io.Writer, data Data) error {
 	fmt.Fprintln(writer)
 	fmt.Fprintf(writer, "Inodes: %.1f%% used  |  %s\n", data.Filesystem.InodePercent, textfmt.Safe(data.Filesystem.Path))
 	if data.Filesystem.GrowthBytesPerSecond > 0 {
-		fmt.Fprintf(writer, "Observed growth: +%s/hour\n", formatBytes(uint64(data.Filesystem.GrowthBytesPerSecond*3600)))
+		fmt.Fprintf(writer, "Filesystem net growth: +%s/hour\n", formatBytes(uint64(data.Filesystem.GrowthBytesPerSecond*3600)))
 		if data.Filesystem.FullInSeconds > 0 {
-			fmt.Fprintf(writer, "Estimated full at observed growth: ~%s\n", duration(data.Filesystem.FullInSeconds))
+			fmt.Fprintf(writer, "Estimated full at net growth: ~%s\n", duration(data.Filesystem.FullInSeconds))
 		}
 	}
 	fmt.Fprintln(writer)
@@ -140,7 +140,7 @@ func text(writer io.Writer, data Data) error {
 			fmt.Fprintf(writer, "%s\n└─ rapid growth: %s/hour\n", textfmt.Safe(file.Path), formatBytes(uint64(file.Growth*3600)))
 		}
 		if data.Filesystem.FullInSeconds > 0 {
-			fmt.Fprintf(writer, "Filesystem could fill in ~%s at the observed aggregate growth.\n", duration(data.Filesystem.FullInSeconds))
+			fmt.Fprintf(writer, "Filesystem could fill in ~%s at the observed net growth.\n", duration(data.Filesystem.FullInSeconds))
 		}
 	}
 	if len(data.Findings) > 0 {

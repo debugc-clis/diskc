@@ -61,7 +61,7 @@ func TestInspectHonorsTopAndUsesSharedSampleWindow(t *testing.T) {
 		}, nil, []string{"partial scan"}, nil
 	}
 	measureCalls := 0
-	measureGrowthGroups = func(groups [][]disk.File, interval time.Duration) error {
+	measureGrowthGroups = func(groups [][]disk.File, filesystems []*disk.Filesystem, interval time.Duration) error {
 		measureCalls++
 		if len(groups) != 2 || interval != time.Second {
 			t.Fatalf("unexpected grouped sample: groups=%d interval=%s", len(groups), interval)

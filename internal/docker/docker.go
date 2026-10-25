@@ -54,7 +54,7 @@ type daemonConfig struct {
 var discover = Discover
 var filesystemUsage = disk.FilesystemUsage
 var scan = disk.Scan
-var measureGrowthGroups = disk.MeasureGrowthGroups
+var measureGrowthGroups = disk.MeasureGrowthGroupsWithFilesystems
 var attributeWriters = proc.AttributeWriters
 
 func Run(args []string, stdout, stderr io.Writer) error {
@@ -100,12 +100,14 @@ func Run(args []string, stdout, stderr io.Writer) error {
 		path.Directories = directories
 	}
 	groups := make([][]disk.File, 0, len(report.Paths))
+	filesystems := make([]*disk.Filesystem, 0, len(report.Paths))
 	for index := range report.Paths {
 		if report.Paths[index].Error == "" && report.Paths[index].candidates != nil {
 			groups = append(groups, report.Paths[index].candidates)
+			filesystems = append(filesystems, &report.Paths[index].Usage)
 		}
 	}
-	if err := measureGrowthGroups(groups, *sample); err != nil {
+	if err := measureGrowthGroups(groups, filesystems, *sample); err != nil {
 		for index := range report.Paths {
 			if report.Paths[index].Error == "" {
 				report.Paths[index].Warnings = append(report.Paths[index].Warnings, err.Error())
@@ -118,7 +120,6 @@ func Run(args []string, stdout, stderr io.Writer) error {
 		if path.Error != "" {
 			continue
 		}
-		disk.UpdateTrend(path.candidates, &path.Usage)
 		path.Files, path.Growing = disk.SelectReportFiles(path.candidates, *top)
 		candidates = append(candidates, path.Files...)
 		candidates = append(candidates, path.Growing...)
@@ -228,7 +229,7 @@ func printReport(writer io.Writer, report Report) error {
 		}
 		fmt.Fprintf(writer, "  Pressure: %.1f%%  Used: %.1f%%  Inodes: %.1f%%  Available: %s\n", path.Usage.PressurePercent, path.Usage.UsedPercent, path.Usage.InodePercent, formatBytes(path.Usage.AvailableBytes))
 		if path.Usage.GrowthBytesPerSecond > 0 {
-			fmt.Fprintf(writer, "  Trend: +%s/hour\n", formatBytes(uint64(path.Usage.GrowthBytesPerSecond*3600)))
+			fmt.Fprintf(writer, "  Filesystem net trend: +%s/hour\n", formatBytes(uint64(path.Usage.GrowthBytesPerSecond*3600)))
 		}
 		if len(path.Files) > 0 {
 			fmt.Fprintln(writer, "  Largest files")
