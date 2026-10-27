@@ -82,6 +82,8 @@ Deleted but still open (38.2 GB retained)
 
 Directory totals cover only files observed within the selected depth and current user's permissions. If a very large scan exceeds the bounded directory tracker, estimated totals are labeled and a warning is emitted.
 
+Scan roots that are symbolic links are resolved before scanning. For example, `diskc light /var` on macOS scans `/private/var`. File and directory paths use the resolved target; the filesystem summary keeps the requested path. Symbolic links encountered inside the scanned tree are skipped, so linked data directories must be passed as separate scan roots. Broken or looping root links produce an inspection error.
+
 ## List filesystems
 
 Use `diskc list` for an instant host view without traversing directory contents:

@@ -3,6 +3,7 @@ package disk
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -11,6 +12,10 @@ import (
 
 func TestScanRanksFilesAndClassifiesThem(t *testing.T) {
 	root := t.TempDir()
+	root, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := os.MkdirAll(filepath.Join(root, "var", "log"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -33,6 +38,105 @@ func TestScanRanksFilesAndClassifiesThem(t *testing.T) {
 	}
 	if files[0].Kind != "log" || files[0].Path != filepath.Join(root, "var", "log", "app.log") {
 		t.Fatalf("unexpected top file: %+v", files[0])
+	}
+}
+
+func TestScanFollowsOnlyRequestedRootSymlinks(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(base, "data")
+	child := filepath.Join(target, "child")
+	outside := filepath.Join(base, "outside")
+	for _, path := range []string{child, outside} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for path, size := range map[string]int{
+		filepath.Join(target, "app.log"): 8192,
+		filepath.Join(child, "db.data"):  16384,
+		filepath.Join(outside, "hidden"): 32768,
+	} {
+		if err := os.WriteFile(path, make([]byte, size), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	alias := filepath.Join(base, "alias")
+	chain := filepath.Join(base, "chain")
+	fileAlias := filepath.Join(base, "file-alias")
+	for link, destination := range map[string]string{
+		alias:                                "data",
+		chain:                                "alias",
+		fileAlias:                            filepath.Join("data", "app.log"),
+		filepath.Join(target, "linked-dir"):  outside,
+		filepath.Join(target, "linked-file"): filepath.Join(outside, "hidden"),
+		filepath.Join(target, "loop"):        "loop",
+	} {
+		if err := os.Symlink(destination, link); err != nil {
+			t.Fatal(err)
+		}
+	}
+	filesystem, err := FilesystemUsage(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name, root, target string
+	}{
+		{"directory", alias, target},
+		{"chain", chain, target},
+		{"intermediate", filepath.Join(alias, "child"), child},
+		{"file", fileAlias, filepath.Join(target, "app.log")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			for _, depth := range []int{0, 1} {
+				files, directories, warnings, err := Scan(test.root, filesystem.Device, depth, 10)
+				if err != nil {
+					t.Fatal(err)
+				}
+				wantFiles, wantDirectories, wantWarnings, err := Scan(test.target, filesystem.Device, depth, 10)
+				if err != nil {
+					t.Fatal(err)
+				}
+				wantCount := 1
+				if test.target == target && depth == 1 {
+					wantCount = 2
+				}
+				if len(files) != wantCount || len(warnings) != 0 || len(wantWarnings) != 0 || !reflect.DeepEqual(files, wantFiles) || !reflect.DeepEqual(directories, wantDirectories) {
+					t.Fatalf("depth %d: alias scan differs from target or followed descendant links: files=%+v directories=%+v warnings=%v; want files=%+v directories=%+v", depth, files, directories, warnings, wantFiles, wantDirectories)
+				}
+				for _, file := range files {
+					if file.AllocatedBytes <= 0 {
+						t.Fatalf("expected allocated disk blocks: %+v", file)
+					}
+				}
+			}
+			files, directories, warnings, err := Scan(test.root, filesystem.Device+1, 4, 10)
+			if err != nil || len(files) != 0 || len(directories) != 0 || len(warnings) != 0 {
+				t.Fatalf("scan crossed device boundary: files=%+v directories=%+v warnings=%v err=%v", files, directories, warnings, err)
+			}
+		})
+	}
+}
+
+func TestScanRejectsBrokenOrLoopingRootSymlinks(t *testing.T) {
+	base := t.TempDir()
+	for _, test := range []struct{ name, destination string }{
+		{"broken", "missing"},
+		{"loop", "loop"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := filepath.Join(base, test.name)
+			if err := os.Symlink(test.destination, root); err != nil {
+				t.Fatal(err)
+			}
+			files, directories, _, err := Scan(root, 0, 4, 10)
+			if err == nil || len(files) != 0 || len(directories) != 0 {
+				t.Fatalf("invalid root must fail explicitly: files=%+v directories=%+v err=%v", files, directories, err)
+			}
+		})
 	}
 }
 

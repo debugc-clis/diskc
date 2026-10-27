@@ -36,6 +36,13 @@ growth, active Linux writers, and deleted-but-open Linux files.
 Without a path, diskc inspects the root filesystem. Multiple paths share one
 growth-sampling window. Explicit paths are the opt-in mechanism for network
 filesystems; automatic all-filesystem scans exclude remote mounts.
+.PP
+Symbolic links in a scan root are resolved before scanning. File and directory
+paths use the resolved target; the filesystem summary keeps the requested path.
+For example, diskc light /var on macOS scans /private/var. Symbolic links
+encountered inside the scanned tree are skipped; pass linked data directories
+as separate roots to inspect them. Broken or looping root links produce an
+inspection error.
 .SH COMMANDS
 .TP
 .B light

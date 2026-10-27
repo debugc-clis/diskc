@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/debugc-clis/diskc/internal/proc"
+	"github.com/debugc-clis/diskc/internal/report"
 )
 
 func TestLightModeDefaults(t *testing.T) {
@@ -76,6 +77,125 @@ func TestRunMixedFlagsProducesJSON(t *testing.T) {
 	files, ok := result["files"].([]any)
 	if !ok || len(files) != 1 {
 		t.Fatalf("expected one file: %#v", result["files"])
+	}
+}
+
+func TestRunSymlinkRootReportsTargetFiles(t *testing.T) {
+	parent, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(parent, "data")
+	alias := filepath.Join(parent, "data-link")
+	outside := filepath.Join(parent, "outside")
+	for _, directory := range []string{filepath.Join(root, "nested"), outside} {
+		if err := os.MkdirAll(directory, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rootFile := filepath.Join(root, "app.log")
+	deepFile := filepath.Join(root, "nested", "deep.log")
+	for _, path := range []string{rootFile, deepFile, filepath.Join(outside, "outside.log")} {
+		if err := os.WriteFile(path, make([]byte, 8192), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for link, target := range map[string]string{alias: root, filepath.Join(root, "escape"): outside, filepath.Join(root, "linked.log"): rootFile} {
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for _, test := range []struct {
+		depth string
+		want  []string
+	}{
+		{depth: "0", want: []string{rootFile}},
+		{depth: "1", want: []string{rootFile, deepFile}},
+	} {
+		t.Run("depth="+test.depth, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			args := []string{"light", alias, "--depth", test.depth, "--json"}
+			if code := run(args, &stdout, &stderr); code != 0 || stderr.Len() != 0 {
+				t.Fatalf("run returned %d, stderr=%q", code, stderr.String())
+			}
+			var result report.Data
+			if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+				t.Fatalf("invalid JSON: %v\n%s", err, stdout.String())
+			}
+			if result.Filesystem.Path != alias {
+				t.Fatalf("filesystem path = %q, want requested path %q", result.Filesystem.Path, alias)
+			}
+			if len(result.Files) != len(test.want) {
+				t.Fatalf("unexpected files: %+v", result.Files)
+			}
+			seen := make(map[string]bool)
+			var allocated int64
+			for _, file := range result.Files {
+				seen[file.Path] = true
+				allocated += file.AllocatedBytes
+			}
+			for _, path := range test.want {
+				if !seen[path] {
+					t.Fatalf("missing canonical file %q: %+v", path, result.Files)
+				}
+			}
+			foundRoot := false
+			for _, directory := range result.Directories {
+				if !strings.HasPrefix(directory.Path, root) {
+					t.Fatalf("noncanonical directory: %+v", directory)
+				}
+				if directory.Path == root {
+					foundRoot = true
+					if directory.AllocatedBytes != allocated {
+						t.Fatalf("root total = %d, want %d", directory.AllocatedBytes, allocated)
+					}
+				}
+			}
+			if !foundRoot || len(result.Warnings) != 0 {
+				t.Fatalf("unexpected scan coverage: directories=%+v warnings=%v", result.Directories, result.Warnings)
+			}
+		})
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"light", alias, "--depth", "0"}, &stdout, &stderr); code != 0 || stderr.Len() != 0 {
+		t.Fatalf("text run returned %d, stderr=%q", code, stderr.String())
+	}
+	for _, want := range []string{"Largest files", rootFile, "Largest scanned directories", root, alias} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("text output missing %q: %s", want, stdout.String())
+		}
+	}
+	for _, excluded := range []string{deepFile, "outside.log", "linked.log", "No regular files found"} {
+		if strings.Contains(stdout.String(), excluded) {
+			t.Fatalf("text output unexpectedly contains %q: %s", excluded, stdout.String())
+		}
+	}
+}
+
+func TestRunInvalidSymlinkRootsFail(t *testing.T) {
+	parent := t.TempDir()
+	for _, test := range []struct {
+		name   string
+		target string
+	}{
+		{name: "broken", target: "missing"},
+		{name: "loop", target: "loop"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := filepath.Join(parent, test.name)
+			if err := os.Symlink(test.target, root); err != nil {
+				t.Fatal(err)
+			}
+			var stdout, stderr bytes.Buffer
+			if code := run([]string{"light", root, "--json"}, &stdout, &stderr); code != 1 {
+				t.Fatalf("run returned %d, want runtime failure; stderr=%q", code, stderr.String())
+			}
+			if stdout.Len() != 0 || !strings.Contains(stderr.String(), root) || !strings.Contains(stderr.String(), "no filesystems could be inspected") {
+				t.Fatalf("unexpected failure output: stdout=%q stderr=%q", stdout.String(), stderr.String())
+			}
+		})
 	}
 }
 

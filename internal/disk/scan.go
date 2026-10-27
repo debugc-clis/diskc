@@ -120,6 +120,12 @@ func Scan(root string, device uint64, maxDepth, limit int) ([]File, []Directory,
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	// Follow aliases only for the requested root. WalkDir still leaves symlinks
+	// found inside that root untouched, keeping traversal within its scope.
+	root, err = filepath.EvalSymlinks(root)
+	if err != nil {
+		return nil, nil, nil, err
+	}
 	candidateLimit := scanCandidateLimit(limit)
 	largest := newFileHeap(candidateLimit, lessAllocated)
 	recent := newFileHeap(candidateLimit, lessModified)
