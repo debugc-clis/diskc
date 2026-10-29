@@ -27,6 +27,18 @@ func (writer *Writer) Write(data []byte) (int, error) {
 
 func (writer *Writer) Err() error { return writer.err }
 
+// GrowthStatusNote explains why a sampled file has no measured growth rate.
+func GrowthStatusNote(status string) string {
+	switch status {
+	case "replaced":
+		return "  [growth unmeasured: file replaced; resample]"
+	case "unavailable":
+		return "  [growth unmeasured: file unavailable or no longer regular; last observed size]"
+	default:
+		return ""
+	}
+}
+
 func Safe(value string) string {
 	var result strings.Builder
 	for _, character := range value {

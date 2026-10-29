@@ -93,7 +93,7 @@ func text(writer io.Writer, data Data) error {
 			if len(file.Writers) > 0 {
 				writers = fmt.Sprintf("  [%d writer(s)]", len(file.Writers))
 			}
-			fmt.Fprintf(writer, "%10s  %s  (%s)%s%s%s\n", formatBytes(uint64(file.AllocatedBytes)), textfmt.Safe(file.Path), textfmt.Safe(file.Kind), apparent(file.AllocatedBytes, file.ApparentBytes), growth(file.Growth), writers)
+			fmt.Fprintf(writer, "%10s  %s  (%s)%s%s%s%s\n", formatBytes(uint64(file.AllocatedBytes)), textfmt.Safe(file.Path), textfmt.Safe(file.Kind), apparent(file.AllocatedBytes, file.ApparentBytes), growth(file.Growth), textfmt.GrowthStatusNote(file.GrowthStatus), writers)
 		}
 	} else {
 		fmt.Fprintln(writer, "No regular files found in the scanned scope.")

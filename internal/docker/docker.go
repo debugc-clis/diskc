@@ -234,7 +234,7 @@ func printReport(writer io.Writer, report Report) error {
 		if len(path.Files) > 0 {
 			fmt.Fprintln(writer, "  Largest files")
 			for _, file := range path.Files {
-				fmt.Fprintf(writer, "    %10s  %s%s\n", formatBytes(uint64(file.AllocatedBytes)), textfmt.Safe(file.Path), growth(file.Growth))
+				fmt.Fprintf(writer, "    %10s  %s%s%s\n", formatBytes(uint64(file.AllocatedBytes)), textfmt.Safe(file.Path), growth(file.Growth), textfmt.GrowthStatusNote(file.GrowthStatus))
 			}
 		}
 		if len(path.Growing) > 0 {

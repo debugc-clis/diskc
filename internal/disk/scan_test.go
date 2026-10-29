@@ -373,6 +373,178 @@ func TestMeasureGrowthGroupsWithFilesystemsSharesDevice(t *testing.T) {
 	}
 }
 
+func TestMeasureGrowthChecksFileIdentityAndAvailability(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		before        string
+		during        string
+		wantStatus    string
+		wantGrowth    int
+		wantFinalSize int64
+	}{
+		{name: "same file grows", during: "append", wantStatus: "measured", wantGrowth: 1, wantFinalSize: 2 << 20},
+		{name: "same file truncates", during: "truncate", wantStatus: "measured", wantGrowth: -1, wantFinalSize: 0},
+		{name: "same file unchanged", wantStatus: "measured", wantFinalSize: 1 << 20},
+		{name: "larger replacement", during: "replace large", wantStatus: "replaced", wantFinalSize: 2 << 20},
+		{name: "smaller replacement", during: "replace small", wantStatus: "replaced", wantFinalSize: 4096},
+		{name: "replacement before baseline", before: "replace large", wantStatus: "replaced", wantFinalSize: 2 << 20},
+		{name: "removed", during: "remove", wantStatus: "unavailable", wantFinalSize: 1 << 20},
+		{name: "latest baseline retained after removal", before: "append", during: "remove", wantStatus: "unavailable", wantFinalSize: 2 << 20},
+		{name: "symlink replacement", during: "symlink", wantStatus: "unavailable", wantFinalSize: 1 << 20},
+		{name: "directory replacement", during: "directory", wantStatus: "unavailable", wantFinalSize: 1 << 20},
+		{name: "missing baseline restored", before: "remove", during: "restore", wantStatus: "unavailable", wantFinalSize: 2 << 20},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(root, "app.log")
+			if err := os.WriteFile(path, make([]byte, 1<<20), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			filesystem, err := FilesystemUsage(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			files, _, _, err := Scan(root, filesystem.Device, 1, 10)
+			if err != nil || len(files) != 1 {
+				t.Fatalf("initial scan: files=%+v err=%v", files, err)
+			}
+			// A prior rate must not survive an unavailable or replaced sample.
+			files[0].Growth = 12345
+			change := func(action string) {
+				t.Helper()
+				var err error
+				switch action {
+				case "":
+					return
+				case "append":
+					var file *os.File
+					file, err = os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+					if err == nil {
+						_, err = file.Write(make([]byte, 1<<20))
+						closeErr := file.Close()
+						if err == nil {
+							err = closeErr
+						}
+					}
+				case "truncate":
+					err = os.Truncate(path, 0)
+				case "replace large", "replace small", "symlink", "directory":
+					// Keep the old inode allocated so the replacement cannot reuse it.
+					err = os.Rename(path, path+".old")
+					if err == nil {
+						switch action {
+						case "replace large":
+							err = os.WriteFile(path, make([]byte, 2<<20), 0o644)
+						case "replace small":
+							err = os.WriteFile(path, make([]byte, 4096), 0o644)
+						case "symlink":
+							err = os.Symlink(path+".old", path)
+						case "directory":
+							err = os.Mkdir(path, 0o755)
+						}
+					}
+				case "remove":
+					err = os.Remove(path)
+				case "restore":
+					err = os.WriteFile(path, make([]byte, 2<<20), 0o644)
+				default:
+					t.Fatalf("unknown test action %q", action)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			change(test.before)
+			original := sampleFilesystemUsage
+			t.Cleanup(func() { sampleFilesystemUsage = original })
+			calls := 0
+			sampleFilesystemUsage = func(path string) (Filesystem, error) {
+				calls++
+				if calls == 2 {
+					change(test.during)
+				}
+				return filesystem, nil
+			}
+			if err := MeasureGrowthGroupsWithFilesystems([][]File{files}, []*Filesystem{&filesystem}, time.Millisecond); err != nil {
+				t.Fatal(err)
+			}
+			file := files[0]
+			if file.GrowthStatus != test.wantStatus || file.ApparentBytes != test.wantFinalSize {
+				t.Fatalf("unexpected sample: %+v; want status=%s apparent=%d", file, test.wantStatus, test.wantFinalSize)
+			}
+			if (test.wantGrowth == 0 && file.Growth != 0) || (test.wantGrowth > 0 && file.Growth <= 0) || (test.wantGrowth < 0 && file.Growth >= 0) {
+				t.Fatalf("unexpected growth %f for direction %d", file.Growth, test.wantGrowth)
+			}
+			_, growing := SelectReportFiles(files, 10)
+			if test.wantGrowth <= 0 && len(growing) != 0 {
+				t.Fatalf("unmeasured/shrinking files must not rank as growing: %+v", growing)
+			}
+		})
+	}
+}
+
+func TestMeasureGrowthRejectsScanDeviceChange(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "app.log")
+	if err := os.WriteFile(path, []byte("unchanged"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	metadata, err := regularFileMetadata(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := []File{{Path: path, identityKnown: true, identity: inodeKey{device: metadata.device + 1, inode: metadata.inode}}}
+	if err := MeasureGrowth(files, time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	if files[0].GrowthStatus != "replaced" || files[0].Growth != 0 {
+		t.Fatalf("device change must invalidate the scan identity: %+v", files[0])
+	}
+}
+
+func TestMeasureGrowthOverlappingRootsKeepIndependentBaselines(t *testing.T) {
+	for _, missingFirst := range []bool{false, true} {
+		name := "rotation between overlapping baselines"
+		if missingFirst {
+			name = "unavailable first overlapping baseline"
+		}
+		t.Run(name, func(t *testing.T) {
+			old := fileMetadata{device: 1, inode: 2, allocatedBytes: 4096, apparentBytes: 100}
+			current := fileMetadata{device: 1, inode: 3, allocatedBytes: 8192, apparentBytes: 200}
+			groups := [][]File{
+				{{Path: "/shared/app.log", identityKnown: true, identity: inodeKey{device: old.device, inode: old.inode}}},
+				{{Path: "/shared/app.log", identityKnown: true, identity: inodeKey{device: current.device, inode: current.inode}}},
+			}
+			calls := 0
+			sampleFile := func(string) (fileMetadata, error) {
+				calls++
+				if calls == 1 {
+					if missingFirst {
+						return fileMetadata{}, os.ErrNotExist
+					}
+					return old, nil
+				}
+				return current, nil
+			}
+			if err := measureGrowthGroupsWithFilesystems(groups, nil, time.Millisecond, sampleFile); err != nil {
+				t.Fatal(err)
+			}
+			wantFirst := "replaced"
+			if missingFirst {
+				wantFirst = "unavailable"
+			}
+			if groups[0][0].GrowthStatus != wantFirst || groups[0][0].Growth != 0 {
+				t.Fatalf("first baseline lost: %+v; want %s", groups[0][0], wantFirst)
+			}
+			if groups[1][0].GrowthStatus != "measured" || groups[1][0].Growth != 0 {
+				t.Fatalf("second baseline lost: %+v", groups[1][0])
+			}
+		})
+	}
+}
+
 func appendAfter(path string, delay time.Duration) {
 	time.Sleep(delay)
 	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)

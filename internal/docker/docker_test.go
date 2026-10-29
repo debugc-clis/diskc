@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -94,5 +95,35 @@ func TestRunKeepsUnavailablePath(t *testing.T) {
 	}
 	if !bytes.Contains(stdout.Bytes(), []byte("Unavailable: cannot inspect: denied")) {
 		t.Fatalf("unavailable path was hidden: %s", stdout.String())
+	}
+}
+
+func TestPrintPreservesUnmeasuredGrowth(t *testing.T) {
+	report := Report{Runtime: "docker", Paths: []PathReport{{Path: "/docker", Files: []disk.File{
+		{Path: "/docker/replaced.log", AllocatedBytes: 4096, GrowthStatus: "replaced"},
+		{Path: "/docker/missing.log", AllocatedBytes: 8192, GrowthStatus: "unavailable"},
+	}}}}
+	var output bytes.Buffer
+	if err := printReport(&output, report); err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"file replaced; resample", "file unavailable or no longer regular; last observed size"} {
+		if !strings.Contains(output.String(), expected) {
+			t.Fatalf("missing %q in output: %s", expected, output.String())
+		}
+	}
+	if strings.Contains(output.String(), "Fastest growth") || strings.Contains(output.String(), "↑") {
+		t.Fatalf("unmeasured growth presented as growing: %s", output.String())
+	}
+	encoded, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got Report
+	if err := json.Unmarshal(encoded, &got); err != nil {
+		t.Fatal(err)
+	}
+	if files := got.Paths[0].Files; files[0].GrowthStatus != "replaced" || files[1].GrowthStatus != "unavailable" {
+		t.Fatalf("growth status lost in JSON: %+v", files)
 	}
 }

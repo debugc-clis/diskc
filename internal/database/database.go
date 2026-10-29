@@ -233,7 +233,7 @@ func Print(writer io.Writer, data []Instance, jsonOutput bool) error {
 				fmt.Fprintf(writer, "  Filesystem net trend: +%s/hour\n", formatBytes(uint64(filesystem.Usage.GrowthBytesPerSecond*3600)))
 			}
 			for _, file := range filesystem.Files {
-				fmt.Fprintf(writer, "  %10s  %s%s\n", formatBytes(uint64(file.AllocatedBytes)), textfmt.Safe(file.Path), growth(file.Growth))
+				fmt.Fprintf(writer, "  %10s  %s%s%s\n", formatBytes(uint64(file.AllocatedBytes)), textfmt.Safe(file.Path), growth(file.Growth), textfmt.GrowthStatusNote(file.GrowthStatus))
 			}
 			if len(filesystem.Growing) > 0 {
 				fmt.Fprintln(writer, "  Fastest growth")

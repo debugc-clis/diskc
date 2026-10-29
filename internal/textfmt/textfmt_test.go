@@ -14,6 +14,19 @@ func TestSafeEscapesTerminalControls(t *testing.T) {
 	}
 }
 
+func TestGrowthStatusNote(t *testing.T) {
+	for _, test := range []struct{ status, want string }{
+		{"", ""},
+		{"measured", ""},
+		{"replaced", "  [growth unmeasured: file replaced; resample]"},
+		{"unavailable", "  [growth unmeasured: file unavailable or no longer regular; last observed size]"},
+	} {
+		if got := GrowthStatusNote(test.status); got != test.want {
+			t.Errorf("GrowthStatusNote(%q) = %q; want %q", test.status, got, test.want)
+		}
+	}
+}
+
 func TestWriterKeepsFirstError(t *testing.T) {
 	writer := NewWriter(failingWriter{})
 	if _, err := writer.Write([]byte("first")); !errors.Is(err, syscall.EPIPE) {

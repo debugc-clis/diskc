@@ -40,6 +40,7 @@ type FileReport struct {
 	AllocatedBytes int64   `json:"allocated_bytes"`
 	ApparentBytes  int64   `json:"apparent_bytes"`
 	Growth         float64 `json:"growth_bytes_per_second,omitempty"`
+	GrowthStatus   string  `json:"growth_status,omitempty"`
 	Kind           string  `json:"kind"`
 	Recommendation string  `json:"recommendation"`
 	Risk           string  `json:"risk"`
@@ -133,7 +134,7 @@ func fileReports(files []disk.File) []FileReport {
 	items := make([]FileReport, 0, len(files))
 	for _, file := range files {
 		recommendation, risk := recommendation(file.Path, file.AllocatedBytes)
-		items = append(items, FileReport{Path: file.Path, AllocatedBytes: file.AllocatedBytes, ApparentBytes: file.ApparentBytes, Growth: file.Growth, Kind: file.Kind, Recommendation: recommendation, Risk: risk})
+		items = append(items, FileReport{Path: file.Path, AllocatedBytes: file.AllocatedBytes, ApparentBytes: file.ApparentBytes, Growth: file.Growth, GrowthStatus: file.GrowthStatus, Kind: file.Kind, Recommendation: recommendation, Risk: risk})
 	}
 	return items
 }
@@ -180,7 +181,7 @@ func print(writer io.Writer, report Report) error {
 			if file.Growth > 0 {
 				growth = fmt.Sprintf("  ↑ %s/s", formatBytes(uint64(file.Growth)))
 			}
-			fmt.Fprintf(writer, "    %10s  %s%s\n", formatBytes(uint64(file.AllocatedBytes)), textfmt.Safe(file.Path), growth)
+			fmt.Fprintf(writer, "    %10s  %s%s%s\n", formatBytes(uint64(file.AllocatedBytes)), textfmt.Safe(file.Path), growth, textfmt.GrowthStatusNote(file.GrowthStatus))
 			fmt.Fprintf(writer, "      recommendation: %s\n      risk: %s\n", textfmt.Safe(file.Recommendation), textfmt.Safe(file.Risk))
 		}
 		if len(root.Growing) > 0 {

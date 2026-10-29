@@ -38,8 +38,11 @@ type File struct {
 	ApparentBytes  int64    `json:"apparent_bytes"`
 	Kind           string   `json:"kind"`
 	Growth         float64  `json:"growth_bytes_per_second"`
+	GrowthStatus   string   `json:"growth_status,omitempty"`
 	Writers        []Writer `json:"writers,omitempty"`
 	ModifiedAt     int64    `json:"-"`
+	identity       inodeKey
+	identityKnown  bool
 }
 
 type Directory struct {
@@ -191,6 +194,8 @@ func Scan(root string, device uint64, maxDepth, limit int) ([]File, []Directory,
 			ApparentBytes:  metadata.apparentBytes,
 			Kind:           classify(path),
 			ModifiedAt:     metadata.modifiedAt,
+			identity:       inodeKey{device: metadata.device, inode: metadata.inode},
+			identityKnown:  true,
 		}
 		largest.add(file)
 		recent.add(file)
@@ -320,6 +325,10 @@ func MeasureGrowthGroups(groups [][]File, interval time.Duration) error {
 var sampleFilesystemUsage = FilesystemUsage
 
 func MeasureGrowthGroupsWithFilesystems(groups [][]File, filesystems []*Filesystem, interval time.Duration) error {
+	return measureGrowthGroupsWithFilesystems(groups, filesystems, interval, regularFileMetadata)
+}
+
+func measureGrowthGroupsWithFilesystems(groups [][]File, filesystems []*Filesystem, interval time.Duration, sampleFile func(string) (fileMetadata, error)) error {
 	if interval <= 0 {
 		return nil
 	}
@@ -330,12 +339,28 @@ func MeasureGrowthGroupsWithFilesystems(groups [][]File, filesystems []*Filesyst
 	if fileCount == 0 && len(filesystems) == 0 {
 		return nil
 	}
-	before := make(map[string]fileMetadata, fileCount)
-	for _, files := range groups {
-		for _, file := range files {
-			metadata, err := metadataForPath(file.Path)
+	type fileSample struct {
+		metadata  fileMetadata
+		available bool
+	}
+	// Overlapping scan roots can contain the same pathname. Keep each baseline
+	// independently: rotation or access changes can occur between observations.
+	before := make([][]fileSample, len(groups))
+	for groupIndex, files := range groups {
+		before[groupIndex] = make([]fileSample, len(files))
+		for index := range files {
+			file := &files[index]
+			file.Growth = 0
+			file.GrowthStatus = "unavailable"
+			metadata, err := sampleFile(file.Path)
 			if err == nil {
-				before[file.Path] = metadata
+				before[groupIndex][index] = fileSample{metadata: metadata, available: true}
+				file.AllocatedBytes = metadata.allocatedBytes
+				file.ApparentBytes = metadata.apparentBytes
+				file.ModifiedAt = metadata.modifiedAt
+				if file.identityKnown && file.identity != (inodeKey{device: metadata.device, inode: metadata.inode}) {
+					file.GrowthStatus = "replaced"
+				}
 			}
 		}
 	}
@@ -371,19 +396,29 @@ func MeasureGrowthGroupsWithFilesystems(groups [][]File, filesystems []*Filesyst
 		*filesystem = usage
 		UpdateTrend(growth, filesystem)
 	}
-	for _, files := range groups {
+	for groupIndex, files := range groups {
 		for index := range files {
-			initial, found := before[files[index].Path]
-			if !found {
-				continue
-			}
-			current, err := metadataForPath(files[index].Path)
+			file := &files[index]
+			initial := before[groupIndex][index]
+			current, err := sampleFile(file.Path)
 			if err != nil {
+				file.GrowthStatus = "unavailable"
 				continue
 			}
-			files[index].Growth = float64(current.allocatedBytes-initial.allocatedBytes) / seconds
-			files[index].AllocatedBytes = current.allocatedBytes
-			files[index].ApparentBytes = current.apparentBytes
+			file.AllocatedBytes = current.allocatedBytes
+			file.ApparentBytes = current.apparentBytes
+			file.ModifiedAt = current.modifiedAt
+			file.identity = inodeKey{device: current.device, inode: current.inode}
+			file.identityKnown = true
+			if !initial.available {
+				continue
+			}
+			if file.GrowthStatus == "replaced" || initial.metadata.device != current.device || initial.metadata.inode != current.inode {
+				file.GrowthStatus = "replaced"
+				continue
+			}
+			file.Growth = float64(current.allocatedBytes-initial.metadata.allocatedBytes) / seconds
+			file.GrowthStatus = "measured"
 		}
 		sort.Slice(files, func(i, j int) bool {
 			if files[i].Growth == files[j].Growth {
@@ -408,6 +443,19 @@ func metadataForPath(path string) (fileMetadata, error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		return fileMetadata{}, err
+	}
+	return metadataFromInfo(info)
+}
+
+// Sampling must not follow a pathname that was replaced with a symlink or
+// treat directories and other non-regular objects as file growth.
+func regularFileMetadata(path string) (fileMetadata, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fileMetadata{}, err
+	}
+	if !info.Mode().IsRegular() {
+		return fileMetadata{}, fmt.Errorf("not a regular file: %s", path)
 	}
 	return metadataFromInfo(info)
 }

@@ -84,6 +84,8 @@ Directory totals cover only files observed within the selected depth and current
 
 Scan roots that are symbolic links are resolved before scanning. For example, `diskc light /var` on macOS scans `/private/var`. File and directory paths use the resolved target; the filesystem summary keeps the requested path. Symbolic links encountered inside the scanned tree are skipped, so linked data directories must be passed as separate scan roots. Broken or looping root links produce an inspection error.
 
+File growth compares allocated blocks only when the scan and both sample observations identify the same regular file by device and inode. If a log is rotated or replaced, its current regular-file size is refreshed but its growth is marked `file replaced; resample`. A missing, unreadable, or non-regular path has unmeasured growth; the report retains its last observed regular-file size. Neither case enters the fastest-growth ranking. Run another sample to measure the current file. This applies to normal, database, Docker, and macOS system scans when sampling is enabled.
+
 ## List filesystems
 
 Use `diskc list` for an instant host view without traversing directory contents:
@@ -232,6 +234,16 @@ Multiple root filesystems produce an array. File and directory objects include `
 - `used_percent`: actual consumed capacity.
 - `pressure_percent`: capacity unavailable to an unprivileged process; alert status uses this value.
 
+Sampled file objects also include `growth_status`:
+
+| Value | Meaning |
+| --- | --- |
+| `measured` | The same regular file was identified at the scan and both sample observations; its rate may be positive, zero, or negative. |
+| `replaced` | Device or inode changed since the scan or between sample observations; no rate was measured. |
+| `unavailable` | A sample observation failed or the path was no longer a regular file; no rate was measured. |
+
+The status is omitted when sampling is disabled. For `replaced` and `unavailable`, a numeric zero in `growth_bytes_per_second` is a placeholder, not evidence of zero growth. macOS system JSON omits zero rate values. File sampling never follows a replacement symlink.
+
 ## Options
 
 The defaults are designed for incident response; tune them only when needed:
@@ -292,6 +304,7 @@ man ./docs/diskc.1
 - `diskc` is diagnostic and read-only. It does not delete, truncate, restart, kill, or modify anything.
 - Run it as the affected service user when practical. Filesystem and Linux `/proc` permissions may hide files or processes owned by other users.
 - Time-to-full uses net filesystem available-byte loss during the short sample, including activity outside scanned candidates. Recovery or deletion can offset growth; zero or negative net growth has no time-to-full estimate. Bursty workloads and block allocation granularity can change the result.
+- File growth is a net change between observations. Truncation and regrowth of the same inode, inode reuse, or a replacement that is restored between observations can be missed; the rate does not measure total write throughput. Directory totals remain the initial scan snapshot even when file sizes are refreshed after sampling.
 - Database files, Docker data, macOS system files, and application support data must not be deleted solely because they appear in a report.
 - Copy-on-write, snapshots, compression, reflinks, quotas, and thin provisioning can make filesystem totals differ from ordinary file sums.
 - `diskc` does not replace filesystem-specific snapshot, quota, SMART, NVMe, or vendor database tools.

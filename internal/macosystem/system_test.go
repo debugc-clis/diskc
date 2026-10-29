@@ -2,10 +2,13 @@ package macosystem
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/debugc-clis/diskc/internal/disk"
 )
 
 func TestRecommendationProtectsSystemFiles(t *testing.T) {
@@ -52,5 +55,36 @@ func TestInspectAndPrintTemporaryRoot(t *testing.T) {
 		if !strings.Contains(output.String(), expected) {
 			t.Fatalf("missing %q in %s", expected, output.String())
 		}
+	}
+}
+
+func TestFileReportsPreserveUnmeasuredGrowth(t *testing.T) {
+	files := fileReports([]disk.File{
+		{Path: "/private/var/replaced.log", AllocatedBytes: 4096, GrowthStatus: "replaced"},
+		{Path: "/private/var/missing.log", AllocatedBytes: 8192, GrowthStatus: "unavailable"},
+	})
+	report := Report{Platform: "darwin", Roots: []RootReport{{Path: "/private/var", Files: files}}}
+	var output bytes.Buffer
+	if err := print(&output, report); err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"file replaced; resample", "file unavailable or no longer regular; last observed size"} {
+		if !strings.Contains(output.String(), expected) {
+			t.Fatalf("missing %q in output: %s", expected, output.String())
+		}
+	}
+	if strings.Contains(output.String(), "Fastest growth") || strings.Contains(output.String(), "↑") {
+		t.Fatalf("unmeasured growth presented as growing: %s", output.String())
+	}
+	encoded, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got Report
+	if err := json.Unmarshal(encoded, &got); err != nil {
+		t.Fatal(err)
+	}
+	if files := got.Roots[0].Files; files[0].GrowthStatus != "replaced" || files[1].GrowthStatus != "unavailable" {
+		t.Fatalf("growth status lost in JSON: %+v", files)
 	}
 }

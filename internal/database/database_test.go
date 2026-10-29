@@ -2,6 +2,7 @@ package database
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -100,5 +101,35 @@ func TestInspectSurfacesUnavailableFilesystem(t *testing.T) {
 	}
 	if !strings.Contains(output.String(), "Unavailable") {
 		t.Fatalf("missing unavailable state: %s", output.String())
+	}
+}
+
+func TestPrintPreservesUnmeasuredGrowth(t *testing.T) {
+	instances := []Instance{{Engine: "postgresql", Filesystems: []Filesystem{{Path: "/db", Files: []disk.File{
+		{Path: "/db/replaced.log", AllocatedBytes: 4096, GrowthStatus: "replaced"},
+		{Path: "/db/missing.log", AllocatedBytes: 8192, GrowthStatus: "unavailable"},
+	}}}}}
+	var output bytes.Buffer
+	if err := Print(&output, instances, false); err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"file replaced; resample", "file unavailable or no longer regular; last observed size"} {
+		if !strings.Contains(output.String(), expected) {
+			t.Fatalf("missing %q in output: %s", expected, output.String())
+		}
+	}
+	if strings.Contains(output.String(), "Fastest growth") || strings.Contains(output.String(), "↑") {
+		t.Fatalf("unmeasured growth presented as growing: %s", output.String())
+	}
+	output.Reset()
+	if err := Print(&output, instances, true); err != nil {
+		t.Fatal(err)
+	}
+	var got []Instance
+	if err := json.Unmarshal(output.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if files := got[0].Filesystems[0].Files; files[0].GrowthStatus != "replaced" || files[1].GrowthStatus != "unavailable" {
+		t.Fatalf("growth status lost in JSON: %+v", files)
 	}
 }

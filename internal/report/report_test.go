@@ -2,6 +2,7 @@ package report
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"strings"
 	"syscall"
@@ -19,6 +20,50 @@ func TestPrintJSON(t *testing.T) {
 	}
 	if !strings.Contains(output.String(), `"/tmp/app.log"`) || !strings.Contains(output.String(), `"allocated_bytes": 2048`) {
 		t.Fatalf("unexpected JSON: %s", output.String())
+	}
+}
+
+func TestPrintDistinguishesUnmeasuredGrowthFromMeasuredZero(t *testing.T) {
+	for _, test := range []struct {
+		status, note string
+	}{
+		{"measured", ""},
+		{"replaced", "growth unmeasured: file replaced; resample"},
+		{"unavailable", "growth unmeasured: file unavailable or no longer regular; last observed size"},
+		{"", ""},
+	} {
+		t.Run(test.status, func(t *testing.T) {
+			data := Data{Files: []disk.File{{Path: "/app.log", AllocatedBytes: 8192, Kind: "log", GrowthStatus: test.status}}}
+			var output bytes.Buffer
+			if err := Print(&output, data, false); err != nil {
+				t.Fatal(err)
+			}
+			if test.note != "" && !strings.Contains(output.String(), test.note) {
+				t.Fatalf("missing unmeasured-growth explanation: %s", output.String())
+			}
+			if test.note == "" && strings.Contains(output.String(), "growth unmeasured") {
+				t.Fatalf("unexpected unavailable label: %s", output.String())
+			}
+			for _, forbidden := range []string{"↑", "↓", "Fastest growth", "rapid growth"} {
+				if strings.Contains(output.String(), forbidden) {
+					t.Fatalf("zero or unmeasured growth presented as a rate: %s", output.String())
+				}
+			}
+			output.Reset()
+			if err := Print(&output, data, true); err != nil {
+				t.Fatal(err)
+			}
+			var decoded Data
+			if err := json.Unmarshal(output.Bytes(), &decoded); err != nil {
+				t.Fatal(err)
+			}
+			if len(decoded.Files) != 1 || decoded.Files[0].GrowthStatus != test.status || decoded.Files[0].Growth != 0 {
+				t.Fatalf("JSON lost sample status: %s", output.String())
+			}
+			if strings.Contains(output.String(), `"growth_status"`) != (test.status != "") {
+				t.Fatalf("sampling-disabled status should be omitted: %s", output.String())
+			}
+		})
 	}
 }
 

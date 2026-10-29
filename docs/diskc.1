@@ -87,6 +87,13 @@ Growth measurement window. Default: 3s. Use 0 to disable.
 Filesystem growth and time-to-full use net available-byte loss during this
 window, including activity outside scanned candidates. Per-file growth is
 attribution only; zero or negative net growth has no time-to-full estimate.
+.PP
+File growth requires the same regular file (device and inode) at the scan and
+both sample observations. Replaced files have their current regular-file size
+refreshed but no measured rate; resample to measure the new file. Unavailable
+or non-regular paths retain their last observed regular-file size and have no
+measured rate. Replacement symlinks are not followed. These files are labeled
+in text and excluded from the fastest-growth ranking in all scan commands.
 .TP
 .B --all
 Inspect all automatically discovered local filesystems.
@@ -99,6 +106,10 @@ Delay after each completed watch scan. Default: 3s.
 .TP
 .B --json
 Emit JSON. With --watch, emit one compact JSON value per line (NDJSON).
+Sampled files include growth_status: measured, replaced, or unavailable.
+The field is omitted when sampling is disabled. A zero rate for replaced or
+unavailable files is a placeholder, not measured zero growth; macOS system JSON
+omits zero rate values.
 .SH SIZE SEMANTICS
 File and directory rankings use filesystem-allocated bytes rather than apparent
 length. Sparse files therefore do not look like consumed disk space, and hard
@@ -106,6 +117,11 @@ links are counted once per scan. JSON also includes apparent bytes.
 .PP
 Filesystem output distinguishes used, free, available, reserved, and pressure.
 Pressure is based on bytes unavailable to an unprivileged process.
+.PP
+File growth is net allocated-block change, not total write throughput.
+Truncation and regrowth of the same inode between observations can be missed.
+Directory totals remain the initial scan snapshot even when sampled file sizes
+are refreshed.
 .SH EXIT STATUS
 0 indicates success or help, 1 indicates a runtime failure, and 2 indicates
 invalid command usage. Broken-pipe termination is treated as success.
