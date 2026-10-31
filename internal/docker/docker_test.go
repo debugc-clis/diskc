@@ -127,3 +127,54 @@ func TestPrintPreservesUnmeasuredGrowth(t *testing.T) {
 		t.Fatalf("growth status lost in JSON: %+v", files)
 	}
 }
+
+func TestRunKeepsWritersWithTheirObservedRows(t *testing.T) {
+	oldUsage, oldScan := filesystemUsage, scan
+	oldMeasure, oldAttribute := measureGrowthGroups, attributeWriters
+	t.Cleanup(func() {
+		filesystemUsage, scan = oldUsage, oldScan
+		measureGrowthGroups, attributeWriters = oldMeasure, oldAttribute
+	})
+	oldDiscover := discover
+	t.Cleanup(func() { discover = oldDiscover })
+	discover = func() Report { return Report{Paths: []PathReport{{Path: "/docker"}, {Path: "/docker/nested"}}} }
+	filesystemUsage = func(path string) (disk.Filesystem, error) { return disk.Filesystem{Path: path, Device: 1}, nil }
+	// Overlapping roots can observe different identities at the same pathname.
+	scan = func(string, uint64, int, int) ([]disk.File, []disk.Directory, []string, error) {
+		return []disk.File{{Path: "/shared/app.log", AllocatedBytes: 100, Growth: 10}}, nil, nil, nil
+	}
+	measureGrowthGroups = func([][]disk.File, []*disk.Filesystem, time.Duration) error { return nil }
+	calls := 0
+	attributeWriters = func(files []disk.File) {
+		calls++
+		if len(files) != 4 {
+			t.Fatalf("got %d attribution rows, want 4", len(files))
+		}
+		for index := range files {
+			if index != 2 {
+				files[index].Writers = []disk.Writer{{PID: index + 1}}
+			}
+		}
+	}
+	var stdout bytes.Buffer
+	if err := Run([]string{"--top", "1", "--sample", "0", "--json"}, &stdout, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	var result Report
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("got %d attribution calls, want 1", calls)
+	}
+	rows := []disk.File{result.Paths[0].Files[0], result.Paths[0].Growing[0], result.Paths[1].Files[0], result.Paths[1].Growing[0]}
+	for index, row := range rows {
+		if index == 2 {
+			if len(row.Writers) != 0 {
+				t.Fatalf("empty writer result inherited another row: %+v", row.Writers)
+			}
+		} else if len(row.Writers) != 1 || row.Writers[0].PID != index+1 {
+			t.Fatalf("row %d got writers %+v, want PID %d", index, row.Writers, index+1)
+		}
+	}
+}

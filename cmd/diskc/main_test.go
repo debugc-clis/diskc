@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/debugc-clis/diskc/internal/disk"
 	"github.com/debugc-clis/diskc/internal/proc"
 	"github.com/debugc-clis/diskc/internal/report"
 )
@@ -303,5 +304,48 @@ func TestWatchWaitsAfterCompletedScan(t *testing.T) {
 	}
 	if elapsed := time.Since(started); elapsed < 65*time.Millisecond {
 		t.Fatalf("watch did not delay after scan completion: %s", elapsed)
+	}
+}
+
+func TestRefreshKeepsWritersWithTheirObservedRows(t *testing.T) {
+	root := t.TempDir()
+	nested := filepath.Join(root, "nested")
+	if err := os.Mkdir(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nested, "app.log"), []byte("log"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	oldAttribute := attributeWriters
+	t.Cleanup(func() { attributeWriters = oldAttribute })
+	calls := 0
+	attributeWriters = func(files []disk.File) {
+		calls++
+		if len(files) != 2 || files[0].Path != files[1].Path {
+			t.Fatalf("expected two overlapping observations, got %+v", files)
+		}
+		// Emulate different identities observed at the shared path, with only the
+		// first observation retaining a visible writable descriptor.
+		files[0].Writers = []disk.Writer{{PID: 123}}
+		files[1].Writers = nil
+	}
+	config := defaultScanConfig(standardMode)
+	config.top, config.sample, config.jsonOutput = 1, 0, true
+	var stdout, stderr bytes.Buffer
+	if err := refresh(&stdout, &stderr, []string{root, nested}, config); err != nil {
+		t.Fatal(err)
+	}
+	var result []report.Data
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 || len(result) != 2 {
+		t.Fatalf("got calls=%d outputs=%d", calls, len(result))
+	}
+	if writers := result[0].Files[0].Writers; len(writers) != 1 || writers[0].PID != 123 {
+		t.Fatalf("first observation lost writers: %+v", writers)
+	}
+	if writers := result[1].Files[0].Writers; len(writers) != 0 {
+		t.Fatalf("second observation inherited writers: %+v", writers)
 	}
 }

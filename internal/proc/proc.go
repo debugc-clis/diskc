@@ -26,8 +26,10 @@ var procRoot = "/proc"
 func AttributeWriters(files []disk.File) {
 	byIdentity := make(map[identity][]int)
 	for index := range files {
-		id, err := fileIdentity(files[index].Path)
-		if err == nil {
+		files[index].Writers = nil
+		device, inode, known := files[index].Identity()
+		if known {
+			id := identity{device: device, inode: inode}
 			byIdentity[id] = append(byIdentity[id], index)
 		}
 	}
@@ -53,15 +55,18 @@ func AttributeWriters(files []disk.File) {
 			if err != nil {
 				continue
 			}
-			for _, fileIndex := range byIdentity[id] {
-				if seen[id] == nil {
-					seen[id] = make(map[int]bool)
-				}
-				if !seen[id][pid] {
-					files[fileIndex].Writers = append(files[fileIndex].Writers, writerInfo(pid))
-					seen[id][pid] = true
-				}
+			indices := byIdentity[id]
+			if len(indices) == 0 || seen[id][pid] {
+				continue
 			}
+			writer := writerInfo(pid)
+			for _, fileIndex := range indices {
+				files[fileIndex].Writers = append(files[fileIndex].Writers, writer)
+			}
+			if seen[id] == nil {
+				seen[id] = make(map[int]bool)
+			}
+			seen[id][pid] = true
 		}
 	}
 }

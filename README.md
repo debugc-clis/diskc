@@ -42,7 +42,7 @@ Running `diskc` with no arguments:
 3. Ranks files and directories by allocated disk blocks, not apparent length.
 4. Samples all candidate files and device activity during one shared three-second window.
 5. Separately reports the largest and fastest-growing files.
-6. Maps writable Linux file descriptors to their processes.
+6. Matches writable Linux file descriptors to the last observed device and inode of each reported file.
 7. Detects deleted-but-open Linux files that still retain allocated blocks.
 8. Estimates time-to-full from net filesystem available-byte loss during the sampling window; per-file growth identifies contributors. JSON labels the basis as `filesystem_available_bytes`.
 9. Adds Linux mount, I/O pressure, RAID, overlay, and copy-on-write findings when available.
@@ -85,6 +85,8 @@ Directory totals cover only files observed within the selected depth and current
 Scan roots that are symbolic links are resolved before scanning. For example, `diskc light /var` on macOS scans `/private/var`. File and directory paths use the resolved target; the filesystem summary keeps the requested path. Symbolic links encountered inside the scanned tree are skipped, so linked data directories must be passed as separate scan roots. Broken or looping root links produce an inspection error.
 
 File growth compares allocated blocks only when the scan and both sample observations identify the same regular file by device and inode. If a log is rotated or replaced, its current regular-file size is refreshed but its growth is marked `file replaced; resample`. A missing, unreadable, or non-regular path has unmeasured growth; the report retains its last observed regular-file size. Neither case enters the fastest-growth ranking. Run another sample to measure the current file. This applies to normal, database, Docker, and macOS system scans when sampling is enabled.
+
+Linux writer attribution uses that file's last valid observation, even with `--sample 0`. If `/var/log/app.log` is renamed after observation and another file takes its place, the original file's writable descriptors remain the matches; the replacement's processes are not attached to the earlier evidence. Paths are historical labels and may have moved. Overlapping scans keep each observation's writers separate, and each process is listed once per file even when it holds several writable descriptors. A writable descriptor is an investigation lead, not proof that the process caused the sampled growth. Verify the PID, descriptor, and service before taking action; permissions and process exits can hide matches.
 
 ## List filesystems
 
@@ -243,6 +245,8 @@ Sampled file objects also include `growth_status`:
 | `unavailable` | A sample observation failed or the path was no longer a regular file; no rate was measured. |
 
 The status is omitted when sampling is disabled. For `replaced` and `unavailable`, a numeric zero in `growth_bytes_per_second` is a placeholder, not evidence of zero growth. macOS system JSON omits zero rate values. File sampling never follows a replacement symlink.
+
+Normal, database, and Docker file objects can include `writers` for visible Linux processes holding writable descriptors to the file's last observed identity. Identity metadata stays internal and is not added to JSON. An omitted `writers` field means no matching process was visible during inspection; it does not establish that no process writes the file.
 
 ## Options
 

@@ -45,6 +45,12 @@ type File struct {
 	identityKnown  bool
 }
 
+// Identity returns the device and inode from the last successful regular-file
+// observation. It does not inspect Path, which may now name a different file.
+func (file File) Identity() (device, inode uint64, known bool) {
+	return file.identity.device, file.identity.inode, file.identityKnown
+}
+
 type Directory struct {
 	Path           string `json:"path"`
 	AllocatedBytes int64  `json:"allocated_bytes"`
@@ -361,6 +367,8 @@ func measureGrowthGroupsWithFilesystems(groups [][]File, filesystems []*Filesyst
 				if file.identityKnown && file.identity != (inodeKey{device: metadata.device, inode: metadata.inode}) {
 					file.GrowthStatus = "replaced"
 				}
+				file.identity = inodeKey{device: metadata.device, inode: metadata.inode}
+				file.identityKnown = true
 			}
 		}
 	}

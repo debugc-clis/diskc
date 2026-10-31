@@ -1,6 +1,7 @@
 package disk
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -553,4 +554,43 @@ func appendAfter(path string, delay time.Duration) {
 	}
 	_, _ = file.Write(make([]byte, 1024*1024))
 	_ = file.Close()
+}
+
+func TestGrowthRetainsBaselineIdentityWhenFinalObservationUnavailable(t *testing.T) {
+	for _, known := range []bool{false, true} {
+		file := File{Path: "/app.log", AllocatedBytes: 512, ApparentBytes: 512, identityKnown: known, identity: inodeKey{device: 1, inode: 10}}
+		files := []File{file}
+		observed := fileMetadata{device: 2, inode: 20, allocatedBytes: 4096, apparentBytes: 2048, modifiedAt: 42}
+		calls := 0
+		err := measureGrowthGroupsWithFilesystems([][]File{files}, nil, time.Millisecond, func(string) (fileMetadata, error) {
+			calls++
+			if calls == 1 {
+				return observed, nil
+			}
+			return fileMetadata{}, os.ErrNotExist
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		device, inode, identityKnown := files[0].Identity()
+		if !identityKnown || device != 2 || inode != 20 || files[0].AllocatedBytes != 4096 || files[0].ApparentBytes != 2048 || files[0].GrowthStatus != "unavailable" || files[0].Growth != 0 {
+			t.Fatalf("last successful size/identity observation lost (initially known=%t): %+v identity=%d/%d/%t", known, files[0], device, inode, identityKnown)
+		}
+	}
+}
+
+func TestFileIdentityRemainsPrivateInJSON(t *testing.T) {
+	encoded, err := json.Marshal(File{Path: "/app.log", identityKnown: true, identity: inodeKey{device: 123, inode: 456}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(encoded, &fields); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"identity", "identityKnown", "device", "inode"} {
+		if _, found := fields[key]; found {
+			t.Fatalf("private identity exposed in JSON: %s", encoded)
+		}
+	}
 }

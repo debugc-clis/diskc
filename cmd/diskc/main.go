@@ -204,6 +204,8 @@ func writerIsTerminal(writer io.Writer) bool {
 	return err == nil && info.Mode()&os.ModeCharDevice != 0
 }
 
+var attributeWriters = proc.AttributeWriters
+
 func refresh(writer, stderr io.Writer, roots []string, config scanConfig) error {
 	if config.all {
 		mounts, err := mount.All()
@@ -284,17 +286,11 @@ func refresh(writer, stderr io.Writer, roots []string, config scanConfig) error 
 		})
 	}
 	if config.inspectProcesses {
-		proc.AttributeWriters(candidates)
-	}
-	writers := make(map[string][]disk.Writer, len(candidates))
-	for _, file := range candidates {
-		if len(file.Writers) > 0 {
-			writers[file.Path] = file.Writers
+		attributeWriters(candidates)
+		for index := range outputs {
+			candidates = attachWriters(outputs[index].Files, candidates)
+			candidates = attachWriters(outputs[index].Growing, candidates)
 		}
-	}
-	for index := range outputs {
-		attachWriters(outputs[index].Files, writers)
-		attachWriters(outputs[index].Growing, writers)
 	}
 	if config.jsonStream {
 		return report.PrintManyJSONStream(writer, outputs)
@@ -309,10 +305,13 @@ func reportMode(mode runMode) string {
 	return ""
 }
 
-func attachWriters(files []disk.File, writers map[string][]disk.Writer) {
+// Attribution preserves candidate order. Copy results by row so overlapping
+// roots that observed different files at the same path cannot share writers.
+func attachWriters(files, attributed []disk.File) []disk.File {
 	for index := range files {
-		files[index].Writers = writers[files[index].Path]
+		files[index].Writers = attributed[index].Writers
 	}
+	return attributed[len(files):]
 }
 
 func deletedForDevice(files []proc.DeletedFile, device uint64) []proc.DeletedFile {

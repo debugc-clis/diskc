@@ -1,4 +1,4 @@
-.TH DISKC 1 "September 2026" "diskc" "User Commands"
+.TH DISKC 1 "October 31, 2026" "diskc" "User Commands"
 .SH NAME
 diskc \- explain filesystem pressure, large files, growth, and writers
 .SH SYNOPSIS
@@ -122,12 +122,26 @@ File growth is net allocated-block change, not total write throughput.
 Truncation and regrowth of the same inode between observations can be missed.
 Directory totals remain the initial scan snapshot even when sampled file sizes
 are refreshed.
+.SH WRITER ATTRIBUTION
+On Linux, writable file descriptors are matched to each reported file's last
+observed device and inode, including when sampling is disabled. Renaming or
+replacing the pathname after observation does not attach the replacement file's
+processes to earlier evidence. Paths are historical labels and may have moved.
+Overlapping scans retain separate observations; each matching PID appears once
+per file even if it holds multiple writable descriptors.
+.PP
+A writable descriptor is an investigation lead, not proof that a process caused
+the sampled growth. Verify the PID, descriptor, and service before taking
+action.
+Permissions and process exits can hide matches. An absent JSON writers field
+means no matching process was visible at inspection, not that no writer exists.
 .SH EXIT STATUS
 0 indicates success or help, 1 indicates a runtime failure, and 2 indicates
 invalid command usage. Broken-pipe termination is treated as success.
 .SH PERMISSIONS
-No root access is required. Files and Linux process details hidden by permissions
-cannot be reported; run diskc as the affected service user when practical.
+No root access is required. Files and Linux process details hidden by
+permissions cannot be reported; run diskc as the affected service user when
+practical.
 .SH SAFETY
 diskc is diagnostic and read-only. Validate findings before deleting files or
 taking production action. See DISCLAIMER.md in the distribution.

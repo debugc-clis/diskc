@@ -133,3 +133,46 @@ func TestPrintPreservesUnmeasuredGrowth(t *testing.T) {
 		t.Fatalf("growth status lost in JSON: %+v", files)
 	}
 }
+
+func TestInspectKeepsWritersWithTheirObservedRows(t *testing.T) {
+	oldUsage, oldScan := filesystemUsage, scan
+	oldMeasure, oldAttribute := measureGrowthGroups, attributeWriters
+	t.Cleanup(func() {
+		filesystemUsage, scan = oldUsage, oldScan
+		measureGrowthGroups, attributeWriters = oldMeasure, oldAttribute
+	})
+
+	filesystemUsage = func(path string) (disk.Filesystem, error) { return disk.Filesystem{Path: path, Device: 1}, nil }
+	// Overlapping roots can observe different identities at the same pathname.
+	scan = func(string, uint64, int, int) ([]disk.File, []disk.Directory, []string, error) {
+		return []disk.File{{Path: "/shared/app.log", AllocatedBytes: 100, Growth: 10}}, nil, nil, nil
+	}
+	measureGrowthGroups = func([][]disk.File, []*disk.Filesystem, time.Duration) error { return nil }
+	calls := 0
+	attributeWriters = func(files []disk.File) {
+		calls++
+		if len(files) != 4 {
+			t.Fatalf("got %d attribution rows, want 4", len(files))
+		}
+		for index := range files {
+			if index != 2 {
+				files[index].Writers = []disk.Writer{{PID: index + 1}}
+			}
+		}
+	}
+	instances := []Instance{{Engine: "postgresql", DataPaths: []string{"/db", "/db/nested"}}}
+	inspect(instances, 1, 4, 0)
+	if calls != 1 {
+		t.Fatalf("got %d attribution calls, want 1", calls)
+	}
+	rows := []disk.File{instances[0].Filesystems[0].Files[0], instances[0].Filesystems[0].Growing[0], instances[0].Filesystems[1].Files[0], instances[0].Filesystems[1].Growing[0]}
+	for index, row := range rows {
+		if index == 2 {
+			if len(row.Writers) != 0 {
+				t.Fatalf("empty writer result inherited another row: %+v", row.Writers)
+			}
+		} else if len(row.Writers) != 1 || row.Writers[0].PID != index+1 {
+			t.Fatalf("row %d got writers %+v, want PID %d", index, row.Writers, index+1)
+		}
+	}
+}

@@ -154,24 +154,21 @@ func inspect(instances []Instance, top, depth int, sample time.Duration) {
 		candidates = append(candidates, filesystem.Growing...)
 	}
 	attributeWriters(candidates)
-	writers := make(map[string][]disk.Writer, len(candidates))
-	for _, file := range candidates {
-		if len(file.Writers) > 0 {
-			writers[file.Path] = file.Writers
-		}
-	}
 	for _, ref := range refs {
 		filesystem := &instances[ref.instance].Filesystems[ref.index]
-		attachWriters(filesystem.Files, writers)
-		attachWriters(filesystem.Growing, writers)
+		candidates = attachWriters(filesystem.Files, candidates)
+		candidates = attachWriters(filesystem.Growing, candidates)
 		filesystem.candidates = nil
 	}
 }
 
-func attachWriters(files []disk.File, writers map[string][]disk.Writer) {
+// Attribution preserves candidate order. Copy results by row so overlapping
+// roots that observed different files at the same path cannot share writers.
+func attachWriters(files, attributed []disk.File) []disk.File {
 	for index := range files {
-		files[index].Writers = writers[files[index].Path]
+		files[index].Writers = attributed[index].Writers
 	}
+	return attributed[len(files):]
 }
 
 func Print(writer io.Writer, data []Instance, jsonOutput bool) error {
