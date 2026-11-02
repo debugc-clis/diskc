@@ -205,6 +205,7 @@ func writerIsTerminal(writer io.Writer) bool {
 }
 
 var attributeWriters = proc.AttributeWriters
+var inspectDeletedFiles = proc.DeletedFiles
 
 func refresh(writer, stderr io.Writer, roots []string, config scanConfig) error {
 	if config.all {
@@ -256,8 +257,9 @@ func refresh(writer, stderr io.Writer, roots []string, config scanConfig) error 
 	}
 
 	var deletedFiles []proc.DeletedFile
+	var processWarnings []string
 	if config.inspectProcesses {
-		deletedFiles = proc.DeletedFiles()
+		deletedFiles, processWarnings = inspectDeletedFiles()
 	}
 	outputs := make([]report.Data, 0, len(targets))
 	candidates := make([]disk.File, 0)
@@ -286,8 +288,10 @@ func refresh(writer, stderr io.Writer, roots []string, config scanConfig) error 
 		})
 	}
 	if config.inspectProcesses {
-		attributeWriters(candidates)
+		processWarnings = append(processWarnings, attributeWriters(candidates)...)
 		for index := range outputs {
+			// Visibility limits must remain visible when text output caps scan warnings.
+			outputs[index].Warnings = append(append([]string(nil), processWarnings...), outputs[index].Warnings...)
 			candidates = attachWriters(outputs[index].Files, candidates)
 			candidates = attachWriters(outputs[index].Growing, candidates)
 		}

@@ -1,4 +1,4 @@
-.TH DISKC 1 "October 31, 2026" "diskc" "User Commands"
+.TH DISKC 1 "November 2, 2026" "diskc" "User Commands"
 .SH NAME
 diskc \- explain filesystem pressure, large files, growth, and writers
 .SH SYNOPSIS
@@ -135,6 +135,18 @@ the sampled growth. Verify the PID, descriptor, and service before taking
 action.
 Permissions and process exits can hide matches. An absent JSON writers field
 means no matching process was visible at inspection, not that no writer exists.
+.PP
+If /proc cannot be read or process descriptor directories or records cannot be
+inspected, text and JSON warnings mark writer attribution or deleted-open
+inspection as unavailable or partial. Visible matches and retained files are
+still reported; retained-space results may be incomplete. Database and Docker
+reports include writer-attribution warnings on inspected paths. Normal process
+and descriptor disappearance is skipped without a warning.
+.PP
+Run as the affected service user when practical and verify process visibility.
+Processes hidden entirely by /proc policy cannot be counted; no warning does
+not establish full visibility. Light mode skips these checks, and macOS does
+not perform Linux process inspection.
 .SH EXIT STATUS
 0 indicates success or help, 1 indicates a runtime failure, and 2 indicates
 invalid command usage. Broken-pipe termination is treated as success.

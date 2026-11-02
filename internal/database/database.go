@@ -153,9 +153,10 @@ func inspect(instances []Instance, top, depth int, sample time.Duration) {
 		candidates = append(candidates, filesystem.Files...)
 		candidates = append(candidates, filesystem.Growing...)
 	}
-	attributeWriters(candidates)
+	processWarnings := attributeWriters(candidates)
 	for _, ref := range refs {
 		filesystem := &instances[ref.instance].Filesystems[ref.index]
+		filesystem.Warnings = append(filesystem.Warnings, processWarnings...)
 		candidates = attachWriters(filesystem.Files, candidates)
 		candidates = attachWriters(filesystem.Growing, candidates)
 		filesystem.candidates = nil

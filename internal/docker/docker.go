@@ -124,11 +124,12 @@ func Run(args []string, stdout, stderr io.Writer) error {
 		candidates = append(candidates, path.Files...)
 		candidates = append(candidates, path.Growing...)
 	}
-	attributeWriters(candidates)
+	processWarnings := attributeWriters(candidates)
 	for index := range report.Paths {
 		if report.Paths[index].Error != "" {
 			continue
 		}
+		report.Paths[index].Warnings = append(report.Paths[index].Warnings, processWarnings...)
 		candidates = attachWriters(report.Paths[index].Files, candidates)
 		candidates = attachWriters(report.Paths[index].Growing, candidates)
 		report.Paths[index].candidates = nil

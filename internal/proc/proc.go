@@ -2,9 +2,11 @@ package proc
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -23,7 +25,7 @@ type DeletedFile struct {
 
 var procRoot = "/proc"
 
-func AttributeWriters(files []disk.File) {
+func AttributeWriters(files []disk.File) []string {
 	byIdentity := make(map[identity][]int)
 	for index := range files {
 		files[index].Writers = nil
@@ -33,10 +35,14 @@ func AttributeWriters(files []disk.File) {
 			byIdentity[id] = append(byIdentity[id], index)
 		}
 	}
+	if !inspectProc() {
+		return nil
+	}
 	entries, err := os.ReadDir(procRoot)
 	if err != nil {
-		return
+		return unavailableWarning("writer attribution", "an empty writers result does not establish that no process writes the files")
 	}
+	var failures inspectionFailures
 	seen := make(map[identity]map[int]bool)
 	for _, entry := range entries {
 		pid, err := strconv.Atoi(entry.Name())
@@ -45,14 +51,21 @@ func AttributeWriters(files []disk.File) {
 		}
 		fds, err := os.ReadDir(filepath.Join(procRoot, entry.Name(), "fd"))
 		if err != nil {
+			failures.record(&failures.directories, err)
 			continue
 		}
 		for _, fd := range fds {
-			if !writableDescriptor(pid, fd.Name()) {
+			writable, err := writableDescriptor(pid, fd.Name())
+			if err != nil {
+				failures.record(&failures.fdinfo, err)
+				continue
+			}
+			if !writable {
 				continue
 			}
 			id, err := fileIdentity(filepath.Join(procRoot, entry.Name(), "fd", fd.Name()))
 			if err != nil {
+				failures.record(&failures.descriptors, err)
 				continue
 			}
 			indices := byIdentity[id]
@@ -69,18 +82,23 @@ func AttributeWriters(files []disk.File) {
 			seen[id][pid] = true
 		}
 	}
+	return failures.warnings("writer attribution", "an empty writers result does not establish that no process writes the files")
 }
 
-func DeletedFiles() []DeletedFile {
+func DeletedFiles() ([]DeletedFile, []string) {
 	type retained struct {
 		file    DeletedFile
 		writers map[int]struct{}
 	}
 	files := make(map[identity]*retained)
+	if !inspectProc() {
+		return nil, nil
+	}
 	entries, err := os.ReadDir(procRoot)
 	if err != nil {
-		return nil
+		return nil, unavailableWarning("deleted-open inspection", "retained-space results are not exhaustive")
 	}
+	var failures inspectionFailures
 	for _, entry := range entries {
 		pid, err := strconv.Atoi(entry.Name())
 		if err != nil || !entry.IsDir() {
@@ -88,27 +106,35 @@ func DeletedFiles() []DeletedFile {
 		}
 		fds, err := os.ReadDir(filepath.Join(procRoot, entry.Name(), "fd"))
 		if err != nil {
+			failures.record(&failures.directories, err)
 			continue
 		}
 		writer := writerInfo(pid)
 		for _, fd := range fds {
 			fdPath := filepath.Join(procRoot, entry.Name(), "fd", fd.Name())
 			target, err := os.Readlink(fdPath)
-			if err != nil || !strings.HasSuffix(target, " (deleted)") {
+			if err != nil {
+				failures.record(&failures.descriptors, err)
+				continue
+			}
+			if !strings.HasSuffix(target, " (deleted)") {
 				continue
 			}
 			id, err := fileIdentity(fdPath)
 			if err != nil {
+				failures.record(&failures.descriptors, err)
 				continue
 			}
 			item := files[id]
 			if item == nil {
 				info, statErr := os.Stat(fdPath)
 				if statErr != nil {
+					failures.record(&failures.descriptors, statErr)
 					continue
 				}
 				stat, ok := info.Sys().(*syscall.Stat_t)
 				if !ok {
+					failures.descriptors++
 					continue
 				}
 				allocatedBytes := stat.Blocks * 512
@@ -137,7 +163,39 @@ func DeletedFiles() []DeletedFile {
 		result = append(result, item.file)
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].AllocatedBytes > result[j].AllocatedBytes })
-	return result
+	return result, failures.warnings("deleted-open inspection", "retained-space results are not exhaustive")
+}
+
+// A fake proc root is used by portable fixtures. Real process descriptor
+// inspection is only supported on Linux.
+func inspectProc() bool {
+	return runtime.GOOS == "linux" || procRoot != "/proc"
+}
+
+const inspectionNextStep = "run as the affected service user when practical and verify process visibility"
+
+func unavailableWarning(operation, consequence string) []string {
+	return []string{fmt.Sprintf("Linux %s unavailable: cannot read /proc; %s; %s", operation, consequence, inspectionNextStep)}
+}
+
+type inspectionFailures struct {
+	directories int
+	fdinfo      int
+	descriptors int
+}
+
+func (failures *inspectionFailures) record(counter *int, err error) {
+	// PIDs and descriptors routinely disappear during a live inspection.
+	if !os.IsNotExist(err) && !errors.Is(err, syscall.ESRCH) {
+		(*counter)++
+	}
+}
+
+func (failures inspectionFailures) warnings(operation, consequence string) []string {
+	if failures.directories+failures.fdinfo+failures.descriptors == 0 {
+		return nil
+	}
+	return []string{fmt.Sprintf("Linux %s partial: could not inspect %d process fd directories, %d fdinfo records, %d descriptors; %s; %s", operation, failures.directories, failures.fdinfo, failures.descriptors, consequence, inspectionNextStep)}
 }
 
 type identity struct {
@@ -211,10 +269,10 @@ func isHex(value string) bool {
 	return true
 }
 
-func writableDescriptor(pid int, fd string) bool {
+func writableDescriptor(pid int, fd string) (bool, error) {
 	file, err := os.Open(filepath.Join(procRoot, strconv.Itoa(pid), "fdinfo", fd))
 	if err != nil {
-		return false
+		return false, err
 	}
 	defer file.Close()
 	scanner := bufio.NewScanner(file)
@@ -224,9 +282,15 @@ func writableDescriptor(pid int, fd string) bool {
 			continue
 		}
 		flags, err := strconv.ParseUint(fields[1], 8, 32)
-		return err == nil && flags&3 != 0
+		if err != nil {
+			return false, fmt.Errorf("invalid descriptor flags: %w", err)
+		}
+		return flags&3 != 0, nil
 	}
-	return false
+	if err := scanner.Err(); err != nil {
+		return false, err
+	}
+	return false, fmt.Errorf("descriptor flags unavailable")
 }
 
 func processUID(pid int) string {

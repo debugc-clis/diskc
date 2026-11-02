@@ -65,7 +65,7 @@ func TestRunHonorsTopAndUsesSharedSampleWindow(t *testing.T) {
 		return nil
 	}
 	attributeCalls := 0
-	attributeWriters = func([]disk.File) { attributeCalls++ }
+	attributeWriters = func([]disk.File) []string { attributeCalls++; return nil }
 	var stdout bytes.Buffer
 	if err := Run([]string{"--top", "1", "--sample", "1s", "--json"}, &stdout, io.Discard); err != nil {
 		t.Fatal(err)
@@ -145,7 +145,7 @@ func TestRunKeepsWritersWithTheirObservedRows(t *testing.T) {
 	}
 	measureGrowthGroups = func([][]disk.File, []*disk.Filesystem, time.Duration) error { return nil }
 	calls := 0
-	attributeWriters = func(files []disk.File) {
+	attributeWriters = func(files []disk.File) []string {
 		calls++
 		if len(files) != 4 {
 			t.Fatalf("got %d attribution rows, want 4", len(files))
@@ -155,6 +155,7 @@ func TestRunKeepsWritersWithTheirObservedRows(t *testing.T) {
 				files[index].Writers = []disk.Writer{{PID: index + 1}}
 			}
 		}
+		return nil
 	}
 	var stdout bytes.Buffer
 	if err := Run([]string{"--top", "1", "--sample", "0", "--json"}, &stdout, io.Discard); err != nil {
@@ -175,6 +176,68 @@ func TestRunKeepsWritersWithTheirObservedRows(t *testing.T) {
 			}
 		} else if len(row.Writers) != 1 || row.Writers[0].PID != index+1 {
 			t.Fatalf("row %d got writers %+v, want PID %d", index, row.Writers, index+1)
+		}
+	}
+}
+
+func TestRunPropagatesWriterWarningsOnlyToInspectedPaths(t *testing.T) {
+	oldDiscover, oldUsage, oldScan := discover, filesystemUsage, scan
+	oldMeasure, oldAttribute := measureGrowthGroups, attributeWriters
+	t.Cleanup(func() {
+		discover, filesystemUsage, scan = oldDiscover, oldUsage, oldScan
+		measureGrowthGroups, attributeWriters = oldMeasure, oldAttribute
+	})
+	discover = func() Report {
+		return Report{Runtime: "docker", Paths: []PathReport{{Path: "/docker"}, {Path: "/unavailable"}, {Path: "/scan-failed"}}}
+	}
+	filesystemUsage = func(path string) (disk.Filesystem, error) {
+		if path == "/unavailable" {
+			return disk.Filesystem{}, errors.New("denied")
+		}
+		return disk.Filesystem{Path: path, Device: 1}, nil
+	}
+	scan = func(path string, _ uint64, _, _ int) ([]disk.File, []disk.Directory, []string, error) {
+		if path == "/scan-failed" {
+			return nil, nil, nil, errors.New("cannot scan")
+		}
+		return []disk.File{{Path: path + "/app.log", AllocatedBytes: 100}}, nil, []string{"scan warning"}, nil
+	}
+	measureGrowthGroups = func([][]disk.File, []*disk.Filesystem, time.Duration) error { return nil }
+	const warning = "writer attribution partial; no visible match does not establish absence"
+	attributeWriters = func(files []disk.File) []string {
+		if len(files) != 1 {
+			t.Fatalf("expected only successful scan rows, got %+v", files)
+		}
+		files[0].Writers = []disk.Writer{{PID: 123}}
+		return []string{warning}
+	}
+	for _, jsonOutput := range []bool{false, true} {
+		var stdout bytes.Buffer
+		args := []string{"--sample", "0"}
+		if jsonOutput {
+			args = append(args, "--json")
+		}
+		if err := Run(args, &stdout, io.Discard); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Count(stdout.String(), warning) != 1 {
+			t.Fatalf("expected warning only on successful path: %s", stdout.String())
+		}
+		if !jsonOutput {
+			continue
+		}
+		var got Report
+		if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+			t.Fatal(err)
+		}
+		for index, path := range got.Paths {
+			if index == 0 {
+				if len(path.Warnings) != 2 || path.Warnings[0] != "scan warning" || path.Warnings[1] != warning || len(path.Files[0].Writers) != 1 || path.Files[0].Writers[0].PID != 123 {
+					t.Fatalf("successful partial evidence lost: %+v", path)
+				}
+			} else if path.Error == "" || len(path.Warnings) != 0 {
+				t.Fatalf("process warning attached to failed path: %+v", path)
+			}
 		}
 	}
 }

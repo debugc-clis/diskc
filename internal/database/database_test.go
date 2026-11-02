@@ -70,7 +70,7 @@ func TestInspectHonorsTopAndUsesSharedSampleWindow(t *testing.T) {
 		return nil
 	}
 	attributeCalls := 0
-	attributeWriters = func([]disk.File) { attributeCalls++ }
+	attributeWriters = func([]disk.File) []string { attributeCalls++; return nil }
 	instances := []Instance{{Engine: "postgresql", DataPaths: []string{"/db/one", "/db/two"}}}
 	inspect(instances, 1, 4, time.Second)
 	if measureCalls != 1 || attributeCalls != 1 {
@@ -149,7 +149,7 @@ func TestInspectKeepsWritersWithTheirObservedRows(t *testing.T) {
 	}
 	measureGrowthGroups = func([][]disk.File, []*disk.Filesystem, time.Duration) error { return nil }
 	calls := 0
-	attributeWriters = func(files []disk.File) {
+	attributeWriters = func(files []disk.File) []string {
 		calls++
 		if len(files) != 4 {
 			t.Fatalf("got %d attribution rows, want 4", len(files))
@@ -159,6 +159,7 @@ func TestInspectKeepsWritersWithTheirObservedRows(t *testing.T) {
 				files[index].Writers = []disk.Writer{{PID: index + 1}}
 			}
 		}
+		return nil
 	}
 	instances := []Instance{{Engine: "postgresql", DataPaths: []string{"/db", "/db/nested"}}}
 	inspect(instances, 1, 4, 0)
@@ -173,6 +174,65 @@ func TestInspectKeepsWritersWithTheirObservedRows(t *testing.T) {
 			}
 		} else if len(row.Writers) != 1 || row.Writers[0].PID != index+1 {
 			t.Fatalf("row %d got writers %+v, want PID %d", index, row.Writers, index+1)
+		}
+	}
+}
+
+func TestInspectPropagatesWriterWarningsOnlyToInspectedPaths(t *testing.T) {
+	oldUsage, oldScan := filesystemUsage, scan
+	oldMeasure, oldAttribute := measureGrowthGroups, attributeWriters
+	t.Cleanup(func() {
+		filesystemUsage, scan = oldUsage, oldScan
+		measureGrowthGroups, attributeWriters = oldMeasure, oldAttribute
+	})
+	filesystemUsage = func(path string) (disk.Filesystem, error) {
+		if path == "/unavailable" {
+			return disk.Filesystem{}, errors.New("denied")
+		}
+		return disk.Filesystem{Path: path, Device: 1}, nil
+	}
+	scan = func(path string, _ uint64, _, _ int) ([]disk.File, []disk.Directory, []string, error) {
+		if path == "/scan-failed" {
+			return nil, nil, nil, errors.New("cannot scan")
+		}
+		return []disk.File{{Path: path + "/app.log", AllocatedBytes: 100}}, nil, []string{"scan warning"}, nil
+	}
+	measureGrowthGroups = func([][]disk.File, []*disk.Filesystem, time.Duration) error { return nil }
+	const warning = "writer attribution partial; no visible match does not establish absence"
+	attributeWriters = func(files []disk.File) []string {
+		if len(files) != 1 {
+			t.Fatalf("expected only successful scan rows, got %+v", files)
+		}
+		files[0].Writers = []disk.Writer{{PID: 123}}
+		return []string{warning}
+	}
+	instances := []Instance{{Engine: "postgresql", DataPaths: []string{"/db", "/unavailable", "/scan-failed"}}}
+	inspect(instances, 1, 4, 0)
+	for index, filesystem := range instances[0].Filesystems {
+		if index == 0 {
+			if len(filesystem.Warnings) != 2 || filesystem.Warnings[0] != "scan warning" || filesystem.Warnings[1] != warning || len(filesystem.Files[0].Writers) != 1 || filesystem.Files[0].Writers[0].PID != 123 {
+				t.Fatalf("successful partial evidence lost: %+v", filesystem)
+			}
+		} else if filesystem.Error == "" || len(filesystem.Warnings) != 0 {
+			t.Fatalf("process warning attached to failed path: %+v", filesystem)
+		}
+	}
+	for _, jsonOutput := range []bool{false, true} {
+		var stdout bytes.Buffer
+		if err := Print(&stdout, instances, jsonOutput); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Count(stdout.String(), warning) != 1 {
+			t.Fatalf("expected warning only on successful path: %s", stdout.String())
+		}
+		if jsonOutput {
+			var got []Instance
+			if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+				t.Fatal(err)
+			}
+			if len(got[0].Filesystems[0].Files[0].Writers) != 1 || got[0].Filesystems[0].Files[0].Writers[0].PID != 123 {
+				t.Fatalf("visible writer lost from JSON: %+v", got)
+			}
 		}
 	}
 }

@@ -318,8 +318,9 @@ func TestRefreshKeepsWritersWithTheirObservedRows(t *testing.T) {
 	}
 	oldAttribute := attributeWriters
 	t.Cleanup(func() { attributeWriters = oldAttribute })
+	const warning = "writer attribution partial across inspected processes"
 	calls := 0
-	attributeWriters = func(files []disk.File) {
+	attributeWriters = func(files []disk.File) []string {
 		calls++
 		if len(files) != 2 || files[0].Path != files[1].Path {
 			t.Fatalf("expected two overlapping observations, got %+v", files)
@@ -328,6 +329,7 @@ func TestRefreshKeepsWritersWithTheirObservedRows(t *testing.T) {
 		// first observation retaining a visible writable descriptor.
 		files[0].Writers = []disk.Writer{{PID: 123}}
 		files[1].Writers = nil
+		return []string{warning}
 	}
 	config := defaultScanConfig(standardMode)
 	config.top, config.sample, config.jsonOutput = 1, 0, true
@@ -347,5 +349,84 @@ func TestRefreshKeepsWritersWithTheirObservedRows(t *testing.T) {
 	}
 	if writers := result[1].Files[0].Writers; len(writers) != 0 {
 		t.Fatalf("second observation inherited writers: %+v", writers)
+	}
+	for _, output := range result {
+		found := 0
+		for _, got := range output.Warnings {
+			if got == warning {
+				found++
+			}
+		}
+		if found != 1 {
+			t.Fatalf("each root needs the shared visibility warning once: %+v", output.Warnings)
+		}
+	}
+}
+
+func TestRefreshPreservesPartialProcessEvidenceAndWarnings(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "app.log"), []byte("log"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	usage, err := disk.FilesystemUsage(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldAttribute, oldDeleted := attributeWriters, inspectDeletedFiles
+	t.Cleanup(func() { attributeWriters, inspectDeletedFiles = oldAttribute, oldDeleted })
+	const writerWarning = "writer attribution partial; investigate as the affected service user"
+	const deletedWarning = "deleted-open inspection partial; retained total is not exhaustive"
+	attributeCalls, deletedCalls := 0, 0
+	attributeWriters = func(files []disk.File) []string {
+		attributeCalls++
+		for index := range files {
+			files[index].Writers = []disk.Writer{{PID: 123, Process: "visible-writer"}}
+		}
+		return []string{writerWarning}
+	}
+	inspectDeletedFiles = func() ([]proc.DeletedFile, []string) {
+		deletedCalls++
+		return []proc.DeletedFile{{Path: "/retained.log", AllocatedBytes: 8192, Device: usage.Device}}, []string{deletedWarning}
+	}
+	for _, mode := range []runMode{standardMode, lightMode} {
+		for _, format := range []string{"text", "json", "stream"} {
+			t.Run(string(mode)+"/"+format, func(t *testing.T) {
+				attributeCalls, deletedCalls = 0, 0
+				config := defaultScanConfig(mode)
+				config.sample = 0
+				config.jsonOutput, config.jsonStream = format != "text", format == "stream"
+				var stdout, stderr bytes.Buffer
+				if err := refresh(&stdout, &stderr, []string{root}, config); err != nil {
+					t.Fatal(err)
+				}
+				if mode == lightMode {
+					if attributeCalls != 0 || deletedCalls != 0 || strings.Contains(stdout.String(), writerWarning) || strings.Contains(stdout.String(), deletedWarning) {
+						t.Fatalf("light mode inspected processes: attribute=%d deleted=%d output=%s", attributeCalls, deletedCalls, stdout.String())
+					}
+					return
+				}
+				if attributeCalls != 1 || deletedCalls != 1 {
+					t.Fatalf("expected one pass each: attribute=%d deleted=%d", attributeCalls, deletedCalls)
+				}
+				if format == "text" {
+					for _, want := range []string{writerWarning, deletedWarning, "PID 123", "Deleted but still open", "/retained.log"} {
+						if !strings.Contains(stdout.String(), want) {
+							t.Fatalf("partial evidence missing %q: %s", want, stdout.String())
+						}
+					}
+					return
+				}
+				var got report.Data
+				if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+					t.Fatal(err)
+				}
+				if len(got.Warnings) != 2 || got.Warnings[0] != deletedWarning || got.Warnings[1] != writerWarning || len(got.Files) != 1 || len(got.Files[0].Writers) != 1 || got.Files[0].Writers[0].PID != 123 || len(got.Deleted) != 1 || got.Deleted[0].AllocatedBytes != 8192 {
+					t.Fatalf("partial evidence lost in JSON: %+v", got)
+				}
+				if format == "stream" && bytes.Count(stdout.Bytes(), []byte("\n")) != 1 {
+					t.Fatalf("stream report must remain one NDJSON value: %s", stdout.String())
+				}
+			})
+		}
 	}
 }
