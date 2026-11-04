@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-func TestScanRanksFilesAndClassifiesThem(t *testing.T) {
+func TestScanRanksFiles(t *testing.T) {
 	root := t.TempDir()
 	root, err := filepath.EvalSymlinks(root)
 	if err != nil {
@@ -37,8 +37,29 @@ func TestScanRanksFilesAndClassifiesThem(t *testing.T) {
 	if len(warnings) != 0 || len(files) != 2 || len(directories) == 0 {
 		t.Fatalf("unexpected scan result: files=%d directories=%d warnings=%v", len(files), len(directories), warnings)
 	}
-	if files[0].Kind != "log" || files[0].Path != filepath.Join(root, "var", "log", "app.log") {
+	if files[0].Path != filepath.Join(root, "var", "log", "app.log") {
 		t.Fatalf("unexpected top file: %+v", files[0])
+	}
+}
+
+func TestClassifyUsesFullPath(t *testing.T) {
+	for _, test := range []struct {
+		path, want string
+	}{
+		{"/var/log/app.log", "log"},
+		{"/tmp/x/app.log", "temporary/cache"},
+		{"/srv/cache/app.log", "temporary/cache"},
+		{"/Users/operator/Library/Caches/data", "temporary/cache"},
+		{"/srv/core.123", "core dump"},
+		{"/srv/backups/data.tar", "archive"},
+		{"/var/lib/postgresql/base/12345", "file"},
+		{"/srv/application/data", "file"},
+	} {
+		t.Run(test.path, func(t *testing.T) {
+			if got := classify(test.path); got != test.want {
+				t.Fatalf("classify(%q) = %q, want %q", test.path, got, test.want)
+			}
+		})
 	}
 }
 
