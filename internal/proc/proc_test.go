@@ -49,6 +49,7 @@ func TestProcFixtureAttributesWritersAndDeletedFiles(t *testing.T) {
 	if len(files[0].Writers) != 1 || files[0].Writers[0].PID != 123 || files[0].Writers[0].Service != "db.service" {
 		t.Fatalf("unexpected writer attribution: %+v", files[0].Writers)
 	}
+	retainUnlinkedFixture(t, target)
 
 	deleted, warnings := DeletedFiles()
 	if len(warnings) != 0 {
@@ -85,6 +86,87 @@ func writeFixtureFile(t *testing.T, path, contents string) {
 	}
 	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Fake proc fd links must follow a genuinely unlinked inode, rather than a
+// linked file whose name only resembles a kernel deleted marker. /dev/fd keeps
+// the open inode accessible on both Linux and macOS without production hooks.
+func retainUnlinkedFixture(t *testing.T, path string) {
+	t.Helper()
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { file.Close() })
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(fmt.Sprintf("/dev/fd/%d", file.Fd()), path); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDeletedFilesRejectsLinkedSuffixNamesAndNonRegularObjects(t *testing.T) {
+	for _, kind := range []string{"linked", "remaining-hardlink", "directory", "fifo"} {
+		t.Run(kind, func(t *testing.T) {
+			root := fixtureProcRoot(t)
+			path := filepath.Join(root, "candidate (deleted)")
+			switch kind {
+			case "directory":
+				if err := os.Mkdir(path, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				retainUnlinkedFixture(t, path)
+			case "fifo":
+				if err := syscall.Mkfifo(path, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			default:
+				writeFixtureFile(t, path, "still linked")
+				if kind == "remaining-hardlink" {
+					alias := filepath.Join(root, "alias")
+					if err := os.Link(path, alias); err != nil {
+						t.Fatal(err)
+					}
+					retainUnlinkedFixture(t, path)
+				}
+			}
+			fixtureDescriptor(t, 123, "3", path, "0100000")
+			deleted, warnings := DeletedFiles()
+			if len(deleted) != 0 || len(warnings) != 0 {
+				t.Fatalf("%s must not be retained-space evidence: files=%+v warnings=%v", kind, deleted, warnings)
+			}
+		})
+	}
+}
+
+func TestDeletedFilesUsesUnlinkedMetadataAndDeduplicatesHolders(t *testing.T) {
+	root := fixtureProcRoot(t)
+	// One suffix belongs to the original filename and one is the proc marker.
+	path := filepath.Join(root, "literal (deleted) (deleted)")
+	writeFixtureFile(t, path, strings.Repeat("x", 8192))
+	retainUnlinkedFixture(t, path)
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stat := info.Sys().(*syscall.Stat_t)
+	for _, pid := range []int{123, 456} {
+		for _, fd := range []string{"3", "4"} {
+			fixtureDescriptor(t, pid, fd, path, "0100000")
+		}
+	}
+	deleted, warnings := DeletedFiles()
+	if len(warnings) != 0 || len(deleted) != 1 {
+		t.Fatalf("want one visible unlinked inode: files=%+v warnings=%v", deleted, warnings)
+	}
+	got := deleted[0]
+	if got.Path != strings.TrimSuffix(path, " (deleted)") || got.Device != uint64(stat.Dev) || got.AllocatedBytes != stat.Blocks*512 || got.ApparentBytes != info.Size() {
+		t.Fatalf("retained metadata does not match observed inode: %+v stat=%+v", got, stat)
+	}
+	if len(got.Writers) != 2 || got.Writers[0].PID != 123 || got.Writers[1].PID != 456 {
+		t.Fatalf("read-only holders should appear once per PID: %+v", got.Writers)
 	}
 }
 
@@ -283,6 +365,7 @@ func TestPartialProcInspectionKeepsVisibleResultsAndAggregatesFailures(t *testin
 	warnings := AttributeWriters(files)
 	assertWriterPIDs(t, files[0], 123)
 	assertVisibilityWarning(t, warnings, "writer attribution partial", "2 process fd directories", "0 fdinfo records", "affected service user")
+	retainUnlinkedFixture(t, path)
 	deleted, warnings := DeletedFiles()
 	if len(deleted) != 1 || len(deleted[0].Writers) != 1 || deleted[0].Writers[0].PID != 123 {
 		t.Fatalf("partial inspection lost visible retained file: %+v", deleted)

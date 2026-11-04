@@ -1,4 +1,4 @@
-.TH DISKC 1 "November 2, 2026" "diskc" "User Commands"
+.TH DISKC 1 "November 4, 2026" "diskc" "User Commands"
 .SH NAME
 diskc \- explain filesystem pressure, large files, growth, and writers
 .SH SYNOPSIS
@@ -135,6 +135,17 @@ the sampled growth. Verify the PID, descriptor, and service before taking
 action.
 Permissions and process exits can hide matches. An absent JSON writers field
 means no matching process was visible at inspection, not that no writer exists.
+.PP
+Deleted-open inspection checks that a descriptor labeled " (deleted)" refers
+to a regular file with zero remaining hard links. Linked files whose names
+end in that text, and inodes still reachable through another hard link, are
+excluded from retained-space results. Device, inode, allocated bytes, and
+apparent length come from one stat observation; each inode is counted once.
+Read-only descriptors can retain space, so listed processes are holders,
+not necessarily writers. Only the final kernel marker is removed from the
+reported path, preserving a literal " (deleted)" in the original filename.
+Paths are historical labels; verify the PID, descriptor, and service before
+planning any action.
 .PP
 If /proc cannot be read or process descriptor directories or records cannot be
 inspected, text and JSON warnings mark writer attribution or deleted-open

@@ -120,23 +120,25 @@ func DeletedFiles() ([]DeletedFile, []string) {
 			if !strings.HasSuffix(target, " (deleted)") {
 				continue
 			}
-			id, err := fileIdentity(fdPath)
+			info, err := os.Stat(fdPath)
 			if err != nil {
 				failures.record(&failures.descriptors, err)
 				continue
 			}
+			stat, ok := info.Sys().(*syscall.Stat_t)
+			if !ok {
+				failures.descriptors++
+				continue
+			}
+			// The suffix alone is ambiguous: a linked file may literally have
+			// that name. Use this one observation for unlink status, identity,
+			// and size, and exclude non-regular objects such as deleted dirs.
+			if !info.Mode().IsRegular() || stat.Nlink != 0 {
+				continue
+			}
+			id := identity{device: uint64(stat.Dev), inode: uint64(stat.Ino)}
 			item := files[id]
 			if item == nil {
-				info, statErr := os.Stat(fdPath)
-				if statErr != nil {
-					failures.record(&failures.descriptors, statErr)
-					continue
-				}
-				stat, ok := info.Sys().(*syscall.Stat_t)
-				if !ok {
-					failures.descriptors++
-					continue
-				}
 				allocatedBytes := stat.Blocks * 512
 				if allocatedBytes < 0 {
 					allocatedBytes = 0
