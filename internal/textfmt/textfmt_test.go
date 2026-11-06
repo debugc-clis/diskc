@@ -2,8 +2,11 @@ package textfmt
 
 import (
 	"errors"
+	"strings"
 	"syscall"
 	"testing"
+
+	"github.com/debugc-clis/diskc/internal/disk"
 )
 
 func TestSafeEscapesTerminalControls(t *testing.T) {
@@ -40,3 +43,23 @@ func TestWriterKeepsFirstError(t *testing.T) {
 type failingWriter struct{}
 
 func (failingWriter) Write([]byte) (int, error) { return 0, syscall.EPIPE }
+
+func TestFormatScanScopeExplainsBoundariesAndSafeNextSteps(t *testing.T) {
+	scope := &disk.ScanScope{Root: "/data\n\x1b[31m", MaxDepth: 0, RegularFiles: 0, SkippedDepthDirectories: 2, SkippedFilesystemDirectories: 3, SkippedPseudoDirectories: 4, SkippedSymlinks: 5, InspectionErrors: 6}
+	text := FormatScanScope(scope)
+	for _, want := range []string{`/data\n\x1b[31m`, "max directory depth 0", "0 unique regular file(s) observed", "depth=2, other filesystem=3, pseudo filesystem=4 | symlinks=5 | inspection errors=6", "Directory totals cover observed files only", "increase --depth", "linked or mounted data paths", "review scan warnings and access permissions"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("missing %q in %s", want, text)
+		}
+	}
+	if strings.Contains(text, "\x1b") {
+		t.Fatalf("raw terminal escape: %q", text)
+	}
+	zero := FormatScanScope(&disk.ScanScope{Root: "/empty"})
+	if strings.Contains(zero, "Next:") || strings.Contains(zero, "complete") || !strings.Contains(zero, "depth=0, other filesystem=0, pseudo filesystem=0 | symlinks=0 | inspection errors=0") {
+		t.Fatalf("zero counts make unsupported claims: %s", zero)
+	}
+	if got := FormatScanScope(nil); got != "" {
+		t.Fatalf("absent scan should have no scope: %q", got)
+	}
+}

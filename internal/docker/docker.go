@@ -36,6 +36,7 @@ type Process struct {
 }
 
 type PathReport struct {
+	ScanScope   *disk.ScanScope  `json:"scan_scope,omitempty"`
 	Path        string           `json:"path"`
 	Kind        string           `json:"kind"`
 	Usage       disk.Filesystem  `json:"usage"`
@@ -53,7 +54,7 @@ type daemonConfig struct {
 
 var discover = Discover
 var filesystemUsage = disk.FilesystemUsage
-var scan = disk.Scan
+var scan = disk.ScanWithScope
 var measureGrowthGroups = disk.MeasureGrowthGroupsWithFilesystems
 var attributeWriters = proc.AttributeWriters
 
@@ -90,7 +91,7 @@ func Run(args []string, stdout, stderr io.Writer) error {
 			continue
 		}
 		path.Usage = usage
-		files, directories, warnings, err := scan(path.Path, usage.Device, *depth, *top)
+		files, directories, scope, warnings, err := scan(path.Path, usage.Device, *depth, *top)
 		path.Warnings = append(path.Warnings, warnings...)
 		if err != nil {
 			path.Error = fmt.Sprintf("cannot scan: %v", err)
@@ -98,6 +99,7 @@ func Run(args []string, stdout, stderr io.Writer) error {
 		}
 		path.candidates = files
 		path.Directories = directories
+		path.ScanScope = &scope
 	}
 	groups := make([][]disk.File, 0, len(report.Paths))
 	filesystems := make([]*disk.Filesystem, 0, len(report.Paths))
@@ -228,6 +230,7 @@ func printReport(writer io.Writer, report Report) error {
 			}
 			continue
 		}
+		fmt.Fprint(writer, textfmt.FormatScanScope(path.ScanScope))
 		fmt.Fprintf(writer, "  Pressure: %.1f%%  Used: %.1f%%  Inodes: %.1f%%  Available: %s\n", path.Usage.PressurePercent, path.Usage.UsedPercent, path.Usage.InodePercent, formatBytes(path.Usage.AvailableBytes))
 		if path.Usage.GrowthBytesPerSecond > 0 {
 			fmt.Fprintf(writer, "  Filesystem net trend: +%s/hour\n", formatBytes(uint64(path.Usage.GrowthBytesPerSecond*3600)))

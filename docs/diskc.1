@@ -1,4 +1,4 @@
-.TH DISKC 1 "November 4, 2026" "diskc" "User Commands"
+.TH DISKC 1 "November 6, 2026" "diskc" "User Commands"
 .SH NAME
 diskc \- explain filesystem pressure, large files, growth, and writers
 .SH SYNOPSIS
@@ -80,6 +80,8 @@ Number of largest and fastest-growing files to report. Default: 20.
 .TP
 .BI --depth " N"
 Maximum directory depth to scan. Default: 4.
+Depth is relative to the resolved root: 0 includes files directly in the root;
+1 also includes files in its immediate child directories.
 .TP
 .BI --sample " DURATION"
 Growth measurement window. Default: 3s. Use 0 to disable.
@@ -122,6 +124,35 @@ File growth is net allocated-block change, not total write throughput.
 Truncation and regrowth of the same inode between observations can be missed.
 Directory totals remain the initial scan snapshot even when sampled file sizes
 are refreshed.
+.SH SCAN SCOPE
+Every successful normal, light, database, Docker, and macOS system scan reports
+the resolved root, selected maximum directory depth, unique regular files
+observed before candidate pruning, directories skipped by depth, filesystem
+device, or pseudo-filesystem path rules, skipped symbolic links, and inspection
+errors. Directory totals cover observed files only; they exclude directory
+metadata, other filesystems, deleted-open files, and unobserved contents.
+.PP
+Counters cover boundaries actually encountered, not descendants hidden behind
+them. A directory is counted under its first applicable exclusion:
+pseudo-filesystem, depth, then filesystem device. Links in skipped subtrees are
+not counted. Inspection errors are counted even when detailed warnings are
+capped. Zero counts do not establish complete filesystem visibility.
+.PP
+If depth hides subtrees, increase --depth or inspect a relevant subtree
+explicitly, for example diskc light /data/service --depth 4. Inspect linked or
+mounted data roots explicitly when needed; a remote path can block on a stale
+mount. For inspection errors, review warnings and access. All checks are
+read-only.
+.PP
+JSON includes scan_scope beside filesystem in normal/light reports, on each
+successful database filesystems entry, Docker paths entry, or macOS roots entry.
+Failed scans do not claim a successful scope. Fields are root, max_depth,
+regular_files, skipped_depth_directories, skipped_filesystem_directories,
+skipped_pseudo_directories, skipped_symlinks, and inspection_errors.
+All counters
+are present, including zeros. Scope describes the initial traversal, before
+candidate selection and growth sampling; regular_files can exceed the number
+of reported or sampled files.
 .SH WRITER ATTRIBUTION
 On Linux, writable file descriptors are matched to each reported file's last
 observed device and inode, including when sampling is disabled. Renaming or

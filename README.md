@@ -59,6 +59,12 @@ Inodes: 41.0% used  |  /
 Filesystem net growth: +65.5 GB/hour
 Estimated full at net growth: ~35 minutes
 
+Scan scope: / | max directory depth 4 | 12438 unique regular file(s) observed
+Skipped directory boundaries: depth=87, other filesystem=2, pseudo filesystem=4 | symlinks=16 | inspection errors=0
+Directory totals cover observed files only; excluded subtrees and inaccessible files are not included.
+Next: increase --depth or inspect a specific subtree as a scan root.
+Next: inspect linked or mounted data paths explicitly as separate scan roots.
+
 Largest files
    74.8 GB  /var/log/payment/app.log  (log)  ↑ 18.2 MB/s  [1 writer(s)]
    42.1 GB  /tmp/upload-883120.bin  (temporary/cache)
@@ -81,6 +87,12 @@ Deleted but still open (38.2 GB retained)
 ```
 
 Directory totals cover only files observed within the selected depth and current user's permissions. If a very large scan exceeds the bounded directory tracker, estimated totals are labeled and a warning is emitted.
+
+Every successful scan reports its scope before the file rankings: the resolved root, maximum directory depth, unique regular files observed, and counts of directories skipped by depth, another filesystem, or pseudo-filesystem exclusions, plus skipped symbolic links and inspection errors. Depth is relative to the root: `--depth 0` includes files directly in the root; `--depth 1` also includes files in its immediate child directories. The scope describes the initial traversal, before candidate selection and growth sampling, so the observed file count can exceed the number of reported or sampled files.
+
+Skip counts describe boundaries actually encountered, not the contents hidden behind them. A subtree is counted under the first applicable exclusion: pseudo-filesystem, depth, then filesystem device. Symbolic links inside skipped directories are not counted. Inspection errors are counted even when detailed warnings are capped. Zero counts do not establish complete filesystem visibility, and directory totals do not include directory metadata, other filesystems, deleted-open files, or unobserved contents. This scope is shown for normal, light, database, Docker, and macOS system scans.
+
+When depth hides subtrees, increase `--depth` or inspect a relevant subtree explicitly, for example `diskc light /data/service --depth 4`. Inspect linked data directories or mounted filesystems as explicit roots when needed; an explicit remote path can block on a stale mount. Review warnings and access when inspection errors occur. These steps only collect evidence; no cleanup is performed.
 
 Scan roots that are symbolic links are resolved before scanning. For example, `diskc light /var` on macOS scans `/private/var`. File and directory paths use the resolved target; the filesystem summary keeps the requested path. Symbolic links encountered inside the scanned tree are skipped, so linked data directories must be passed as separate scan roots. Broken or looping root links produce an inspection error.
 
@@ -239,6 +251,21 @@ Multiple root filesystems produce an array. File and directory objects include `
 - `reserved_bytes`: free blocks not available to an unprivileged process.
 - `used_percent`: actual consumed capacity.
 - `pressure_percent`: capacity unavailable to an unprivileged process; alert status uses this value.
+
+Each successful scan includes a `scan_scope` object. Normal and light reports place it beside `filesystem`; database reports place it on each inspected `filesystems` entry, Docker on each inspected `paths` entry, and macOS system reports on each inspected `roots` entry. Failed scans do not claim a successful scope. All scope counters are present, including zeros:
+
+| Field | Meaning |
+| --- | --- |
+| `root` | Absolute scan root after resolving symbolic links. |
+| `max_depth` | Selected directory depth relative to that root; zero includes root files. |
+| `regular_files` | Regular files observed on the selected device, with hard links counted once, before candidate pruning. |
+| `skipped_depth_directories` | Encountered directories beyond the selected depth. |
+| `skipped_filesystem_directories` | Encountered directories on another device. |
+| `skipped_pseudo_directories` | Encountered directories excluded by the scanner's pseudo-filesystem path rules. |
+| `skipped_symlinks` | Symbolic links encountered inside the scanned scope and left untraversed. |
+| `inspection_errors` | Encountered traversal, stat, or metadata errors, independent of the warning limit. |
+
+These are observations from a live, bounded scan. They are not an inventory of every excluded descendant or a completeness guarantee.
 
 Sampled file objects also include `growth_status`:
 

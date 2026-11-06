@@ -12,6 +12,7 @@ import (
 )
 
 type Data struct {
+	ScanScope   *disk.ScanScope    `json:"scan_scope,omitempty"`
 	Mode        string             `json:"mode,omitempty"`
 	Filesystem  disk.Filesystem    `json:"filesystem"`
 	Files       []disk.File        `json:"files"`
@@ -86,6 +87,7 @@ func text(writer io.Writer, data Data) error {
 		}
 	}
 	fmt.Fprintln(writer)
+	fmt.Fprint(writer, textfmt.FormatScanScope(data.ScanScope))
 	if len(data.Files) > 0 {
 		fmt.Fprintln(writer, "Largest files")
 		for _, file := range data.Files {

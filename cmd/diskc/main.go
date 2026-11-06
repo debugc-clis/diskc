@@ -155,6 +155,7 @@ type scannedTarget struct {
 	filesystem  disk.Filesystem
 	files       []disk.File
 	directories []disk.Directory
+	scope       disk.ScanScope
 	warnings    []string
 	health      health.Snapshot
 }
@@ -228,7 +229,7 @@ func refresh(writer, stderr io.Writer, roots []string, config scanConfig) error 
 				continue
 			}
 		}
-		files, directories, warnings, err := disk.Scan(root, filesystem.Device, config.depth, config.top)
+		files, directories, scope, warnings, err := disk.ScanWithScope(root, filesystem.Device, config.depth, config.top)
 		if err != nil {
 			fmt.Fprintf(stderr, "diskc: skipping %s: %s\n", textfmt.Safe(root), textfmt.Safe(err.Error()))
 			continue
@@ -236,7 +237,7 @@ func refresh(writer, stderr io.Writer, roots []string, config scanConfig) error 
 		if config.all {
 			seenDevices[filesystem.Device] = struct{}{}
 		}
-		targets = append(targets, scannedTarget{root: root, filesystem: filesystem, files: files, directories: directories, warnings: warnings})
+		targets = append(targets, scannedTarget{root: root, filesystem: filesystem, files: files, directories: directories, scope: scope, warnings: warnings})
 	}
 	if len(targets) == 0 {
 		return fmt.Errorf("no filesystems could be inspected")
@@ -283,7 +284,7 @@ func refresh(writer, stderr io.Writer, roots []string, config scanConfig) error 
 		}
 		outputs = append(outputs, report.Data{
 			Mode: reportMode(config.mode), Filesystem: target.filesystem, Files: largest,
-			Growing: growing, Directories: target.directories, Deleted: deleted,
+			Growing: growing, Directories: target.directories, Deleted: deleted, ScanScope: &target.scope,
 			Findings: findings, Warnings: target.warnings,
 		})
 	}

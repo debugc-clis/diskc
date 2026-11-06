@@ -188,3 +188,31 @@ func TestPrintReturnsWriterError(t *testing.T) {
 type errorWriter struct{}
 
 func (errorWriter) Write([]byte) (int, error) { return 0, syscall.EPIPE }
+
+func TestPrintEmptyScanScopeInTextAndJSON(t *testing.T) {
+	data := Data{ScanScope: &disk.ScanScope{Root: "/resolved/data", MaxDepth: 0, SkippedDepthDirectories: 1}}
+	var output bytes.Buffer
+	if err := Print(&output, data, false); err != nil {
+		t.Fatal(err)
+	}
+	text := output.String()
+	if !strings.Contains(text, "Scan scope: /resolved/data | max directory depth 0 | 0 unique regular file(s) observed") || !strings.Contains(text, "depth=1") || strings.Index(text, "Scan scope:") > strings.Index(text, "No regular files") {
+		t.Fatalf("empty scope not explained before results: %s", text)
+	}
+	output.Reset()
+	if err := Print(&output, data, true); err != nil {
+		t.Fatal(err)
+	}
+	var decoded Data
+	if err := json.Unmarshal(output.Bytes(), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.ScanScope == nil || *decoded.ScanScope != *data.ScanScope {
+		t.Fatalf("scope lost in JSON: %s", output.String())
+	}
+	for _, field := range []string{`"max_depth": 0`, `"regular_files": 0`, `"skipped_depth_directories": 1`, `"skipped_filesystem_directories": 0`, `"skipped_pseudo_directories": 0`, `"skipped_symlinks": 0`, `"inspection_errors": 0`} {
+		if !strings.Contains(output.String(), field) {
+			t.Fatalf("missing scope field %s: %s", field, output.String())
+		}
+	}
+}

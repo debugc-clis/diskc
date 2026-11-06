@@ -58,6 +58,20 @@ type Directory struct {
 	Estimated      bool   `json:"estimated,omitempty"`
 }
 
+// ScanScope records only entries encountered during a scan. Skip counts describe
+// observed boundaries, not the number of files or directories hidden below them.
+// Zero errors or skips cannot establish complete visibility of a live filesystem.
+type ScanScope struct {
+	Root                         string `json:"root"`
+	MaxDepth                     int    `json:"max_depth"`
+	RegularFiles                 int    `json:"regular_files"`
+	SkippedDepthDirectories      int    `json:"skipped_depth_directories"`
+	SkippedFilesystemDirectories int    `json:"skipped_filesystem_directories"`
+	SkippedPseudoDirectories     int    `json:"skipped_pseudo_directories"`
+	SkippedSymlinks              int    `json:"skipped_symlinks"`
+	InspectionErrors             int    `json:"inspection_errors"`
+}
+
 type Writer struct {
 	PID       int    `json:"pid"`
 	Process   string `json:"process"`
@@ -125,16 +139,25 @@ func FilesystemUsage(path string) (Filesystem, error) {
 }
 
 func Scan(root string, device uint64, maxDepth, limit int) ([]File, []Directory, []string, error) {
+	files, directories, _, warnings, err := ScanWithScope(root, device, maxDepth, limit)
+	return files, directories, warnings, err
+}
+
+// ScanWithScope scans with the same bounds as Scan and reports the coverage of
+// that initial traversal, before candidate pruning and growth sampling.
+func ScanWithScope(root string, device uint64, maxDepth, limit int) ([]File, []Directory, ScanScope, []string, error) {
+	scope := ScanScope{MaxDepth: maxDepth}
 	root, err := filepath.Abs(root)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, scope, nil, err
 	}
 	// Follow aliases only for the requested root. WalkDir still leaves symlinks
 	// found inside that root untouched, keeping traversal within its scope.
 	root, err = filepath.EvalSymlinks(root)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, scope, nil, err
 	}
+	scope.Root = root
 	candidateLimit := scanCandidateLimit(limit)
 	largest := newFileHeap(candidateLimit, lessAllocated)
 	recent := newFileHeap(candidateLimit, lessModified)
@@ -146,6 +169,7 @@ func Scan(root string, device uint64, maxDepth, limit int) ([]File, []Directory,
 
 	err = filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
+			scope.InspectionErrors++
 			warnings.add(fmt.Sprintf("cannot read %s: %v", path, walkErr))
 			if entry != nil && entry.IsDir() {
 				return filepath.SkipDir
@@ -153,24 +177,36 @@ func Scan(root string, device uint64, maxDepth, limit int) ([]File, []Directory,
 			return nil
 		}
 		if entry.IsDir() {
-			if path != root && (isPseudoFilesystem(path) || depth(root, path) > maxDepth) {
-				return filepath.SkipDir
-			}
 			if path != root {
+				if isPseudoFilesystem(path) {
+					scope.SkippedPseudoDirectories++
+					return filepath.SkipDir
+				}
+				if depth(root, path) > maxDepth {
+					scope.SkippedDepthDirectories++
+					return filepath.SkipDir
+				}
 				info, statErr := entry.Info()
 				if statErr != nil {
+					scope.InspectionErrors++
 					warnings.add(fmt.Sprintf("cannot stat %s: %v", path, statErr))
 					return filepath.SkipDir
 				}
 				metadata, metadataErr := metadataFromInfo(info)
 				if metadataErr != nil {
+					scope.InspectionErrors++
 					warnings.add(fmt.Sprintf("cannot inspect %s: %v", path, metadataErr))
 					return filepath.SkipDir
 				}
 				if metadata.device != device {
+					scope.SkippedFilesystemDirectories++
 					return filepath.SkipDir
 				}
 			}
+			return nil
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			scope.SkippedSymlinks++
 			return nil
 		}
 		if !entry.Type().IsRegular() {
@@ -178,11 +214,17 @@ func Scan(root string, device uint64, maxDepth, limit int) ([]File, []Directory,
 		}
 		info, statErr := entry.Info()
 		if statErr != nil {
+			scope.InspectionErrors++
 			warnings.add(fmt.Sprintf("cannot stat %s: %v", path, statErr))
 			return nil
 		}
 		metadata, metadataErr := metadataFromInfo(info)
-		if metadataErr != nil || metadata.device != device {
+		if metadataErr != nil {
+			scope.InspectionErrors++
+			warnings.add(fmt.Sprintf("cannot inspect %s: %v", path, metadataErr))
+			return nil
+		}
+		if metadata.device != device {
 			return nil
 		}
 		if metadata.links > 1 {
@@ -214,8 +256,9 @@ func Scan(root string, device uint64, maxDepth, limit int) ([]File, []Directory,
 		return nil
 	})
 	if err != nil {
-		return nil, nil, warnings.result(), err
+		return nil, nil, scope, warnings.result(), err
 	}
+	scope.RegularFiles = fileCount
 
 	files := mergeCandidates(largest.files(), recent.files(), candidateLimit)
 	if fileCount > len(files) {
@@ -228,7 +271,7 @@ func Scan(root string, device uint64, maxDepth, limit int) ([]File, []Directory,
 		warnings.add(fmt.Sprintf("directory totals use bounded heavy-hitter estimates after more than %d directories", candidateLimit))
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].AllocatedBytes > files[j].AllocatedBytes })
-	return files, directories.result(limit), warnings.result(), nil
+	return files, directories.result(limit), scope, warnings.result(), nil
 }
 
 func scanCandidateLimit(reportLimit int) int {

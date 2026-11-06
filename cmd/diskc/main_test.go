@@ -430,3 +430,65 @@ func TestRefreshPreservesPartialProcessEvidenceAndWarnings(t *testing.T) {
 		}
 	}
 }
+
+func TestRunReportsActualScanScopeForEachRoot(t *testing.T) {
+	base := t.TempDir()
+	data := filepath.Join(base, "data")
+	empty := filepath.Join(base, "empty")
+	if err := os.MkdirAll(filepath.Join(data, "child"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(empty, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(data, "child", "hidden"), make([]byte, 8192), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(base, "alias")
+	if err := os.Symlink(data, alias); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := filepath.EvalSymlinks(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldAttribute, oldDeleted := attributeWriters, inspectDeletedFiles
+	t.Cleanup(func() { attributeWriters, inspectDeletedFiles = oldAttribute, oldDeleted })
+	attributeWriters = func([]disk.File) []string { return nil }
+	inspectDeletedFiles = func() ([]proc.DeletedFile, []string) { return nil, nil }
+	for _, mode := range []string{"standard", "light"} {
+		for _, depth := range []int{0, 1} {
+			t.Run(fmt.Sprintf("%s/depth%d", mode, depth), func(t *testing.T) {
+				args := []string{alias, empty, "--depth", fmt.Sprint(depth), "--sample", "0"}
+				if mode == "light" {
+					args = append([]string{"light"}, args...)
+				}
+				var stdout, stderr bytes.Buffer
+				if code := run(append(append([]string{}, args...), "--json"), &stdout, &stderr); code != 0 {
+					t.Fatalf("run failed %d: %s", code, stderr.String())
+				}
+				var reports []report.Data
+				if err := json.Unmarshal(stdout.Bytes(), &reports); err != nil {
+					t.Fatal(err)
+				}
+				if len(reports) != 2 || reports[0].ScanScope == nil || reports[1].ScanScope == nil {
+					t.Fatalf("missing per-root scope: %s", stdout.String())
+				}
+				scope := reports[0].ScanScope
+				if scope.Root != resolved || scope.MaxDepth != depth || scope.RegularFiles != depth || scope.SkippedDepthDirectories != 1-depth || scope.SkippedSymlinks != 0 || reports[1].ScanScope.RegularFiles != 0 {
+					t.Fatalf("incorrect scope: %+v / %+v", scope, reports[1].ScanScope)
+				}
+				stdout.Reset()
+				if code := run(args, &stdout, &stderr); code != 0 {
+					t.Fatalf("text run failed %d: %s", code, stderr.String())
+				}
+				if strings.Count(stdout.String(), "Scan scope:") != 2 || !strings.Contains(stdout.String(), fmt.Sprintf("max directory depth %d", depth)) {
+					t.Fatalf("missing per-root text scope: %s", stdout.String())
+				}
+				if depth == 0 && !strings.Contains(stdout.String(), "increase --depth") {
+					t.Fatalf("no next investigation step: %s", stdout.String())
+				}
+			})
+		}
+	}
+}

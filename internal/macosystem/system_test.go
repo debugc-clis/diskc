@@ -88,3 +88,46 @@ func TestFileReportsPreserveUnmeasuredGrowth(t *testing.T) {
 		t.Fatalf("growth status lost in JSON: %+v", files)
 	}
 }
+
+func TestInspectEmptyRootsPreservesDistinctScopeInTextAndJSON(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "data")
+	empty := filepath.Join(base, "empty")
+	if err := os.MkdirAll(filepath.Join(root, "child"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(empty, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "child", "data"), make([]byte, 8192), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	oldRoots := roots
+	t.Cleanup(func() { roots = oldRoots })
+	roots = []rootDefinition{{Path: root}, {Path: empty}}
+	report := inspect(1, 0, 0)
+	if len(report.Roots) != 2 || report.Roots[0].ScanScope == nil || report.Roots[1].ScanScope == nil || report.Roots[0].ScanScope == report.Roots[1].ScanScope {
+		t.Fatalf("per-root scopes missing or shared: %+v", report)
+	}
+	if report.Roots[0].ScanScope.RegularFiles != 0 || report.Roots[0].ScanScope.MaxDepth != 0 || report.Roots[0].ScanScope.SkippedDepthDirectories != 1 || report.Roots[1].ScanScope.SkippedDepthDirectories != 0 {
+		t.Fatalf("scope incorrect: %+v / %+v", report.Roots[0].ScanScope, report.Roots[1].ScanScope)
+	}
+	var output bytes.Buffer
+	if err := print(&output, report); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(output.String(), "Scan scope:") != 2 || !strings.Contains(output.String(), "increase --depth") || strings.Index(output.String(), "Scan scope:") > strings.Index(output.String(), "No regular files") {
+		t.Fatalf("empty scopes lost: %s", output.String())
+	}
+	encoded, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded Report
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Roots[0].ScanScope == nil || *decoded.Roots[0].ScanScope != *report.Roots[0].ScanScope || decoded.Roots[1].ScanScope == nil || *decoded.Roots[1].ScanScope != *report.Roots[1].ScanScope {
+		t.Fatalf("scope lost in JSON: %s", encoded)
+	}
+}

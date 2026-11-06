@@ -5,6 +5,8 @@ import (
 	"io"
 	"strings"
 	"unicode"
+
+	"github.com/debugc-clis/diskc/internal/disk"
 )
 
 type Writer struct {
@@ -61,5 +63,27 @@ func Safe(value string) string {
 			result.WriteRune(character)
 		}
 	}
+	return result.String()
+}
+
+// FormatScanScope describes observed scan boundaries without claiming full visibility.
+func FormatScanScope(scope *disk.ScanScope) string {
+	if scope == nil {
+		return ""
+	}
+	var result strings.Builder
+	fmt.Fprintf(&result, "Scan scope: %s | max directory depth %d | %d unique regular file(s) observed\n", Safe(scope.Root), scope.MaxDepth, scope.RegularFiles)
+	fmt.Fprintf(&result, "Skipped directory boundaries: depth=%d, other filesystem=%d, pseudo filesystem=%d | symlinks=%d | inspection errors=%d\n", scope.SkippedDepthDirectories, scope.SkippedFilesystemDirectories, scope.SkippedPseudoDirectories, scope.SkippedSymlinks, scope.InspectionErrors)
+	fmt.Fprintln(&result, "Directory totals cover observed files only; excluded subtrees and inaccessible files are not included.")
+	if scope.SkippedDepthDirectories > 0 {
+		fmt.Fprintln(&result, "Next: increase --depth or inspect a specific subtree as a scan root.")
+	}
+	if scope.SkippedSymlinks > 0 || scope.SkippedFilesystemDirectories > 0 {
+		fmt.Fprintln(&result, "Next: inspect linked or mounted data paths explicitly as separate scan roots.")
+	}
+	if scope.InspectionErrors > 0 {
+		fmt.Fprintln(&result, "Next: review scan warnings and access permissions; run as the affected service user when practical.")
+	}
+	fmt.Fprintln(&result)
 	return result.String()
 }

@@ -25,6 +25,7 @@ type Report struct {
 }
 
 type RootReport struct {
+	ScanScope   *disk.ScanScope  `json:"scan_scope,omitempty"`
 	Path        string           `json:"path"`
 	Category    string           `json:"category"`
 	Files       []FileReport     `json:"files,omitempty"`
@@ -106,12 +107,12 @@ func inspect(top, maxDepth int, sample time.Duration) Report {
 			report.Warnings = append(report.Warnings, fmt.Sprintf("cannot inspect %s: %v", definition.Path, err))
 			continue
 		}
-		files, directories, warnings, err := disk.Scan(definition.Path, filesystem.Device, maxDepth, top)
+		files, directories, scope, warnings, err := disk.ScanWithScope(definition.Path, filesystem.Device, maxDepth, top)
 		if err != nil {
 			report.Warnings = append(report.Warnings, fmt.Sprintf("cannot scan %s: %v", definition.Path, err))
 			continue
 		}
-		report.Roots = append(report.Roots, RootReport{Path: definition.Path, Category: definition.Category, Directories: directories, candidates: files})
+		report.Roots = append(report.Roots, RootReport{ScanScope: &scope, Path: definition.Path, Category: definition.Category, Directories: directories, candidates: files})
 		report.Warnings = append(report.Warnings, warnings...)
 	}
 	groups := make([][]disk.File, len(report.Roots))
@@ -171,6 +172,7 @@ func print(writer io.Writer, report Report) error {
 	fmt.Fprintf(writer, "macOS system disk report\nPlatform: %s\n", textfmt.Safe(report.Platform))
 	for _, root := range report.Roots {
 		fmt.Fprintf(writer, "\n%s (%s)\n", textfmt.Safe(root.Path), textfmt.Safe(root.Category))
+		fmt.Fprint(writer, textfmt.FormatScanScope(root.ScanScope))
 		if len(root.Files) == 0 {
 			fmt.Fprintln(writer, "  No regular files found at the selected depth.")
 			continue

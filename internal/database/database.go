@@ -37,6 +37,7 @@ type Process struct {
 }
 
 type Filesystem struct {
+	ScanScope   *disk.ScanScope  `json:"scan_scope,omitempty"`
 	Path        string           `json:"path"`
 	Usage       disk.Filesystem  `json:"usage"`
 	Files       []disk.File      `json:"files,omitempty"`
@@ -63,7 +64,7 @@ var definitions = []definition{
 
 var discover = Discover
 var filesystemUsage = disk.FilesystemUsage
-var scan = disk.Scan
+var scan = disk.ScanWithScope
 var measureGrowthGroups = disk.MeasureGrowthGroupsWithFilesystems
 var attributeWriters = proc.AttributeWriters
 
@@ -121,7 +122,7 @@ func inspect(instances []Instance, top, depth int, sample time.Duration) {
 				continue
 			}
 			filesystem.Usage = usage
-			files, directories, warnings, err := scan(path, usage.Device, depth, top)
+			files, directories, scope, warnings, err := scan(path, usage.Device, depth, top)
 			filesystem.Warnings = append(filesystem.Warnings, warnings...)
 			if err != nil {
 				filesystem.Error = fmt.Sprintf("cannot scan: %v", err)
@@ -130,6 +131,7 @@ func inspect(instances []Instance, top, depth int, sample time.Duration) {
 			}
 			filesystem.candidates = files
 			filesystem.Directories = directories
+			filesystem.ScanScope = &scope
 			instances[instanceIndex].Filesystems = append(instances[instanceIndex].Filesystems, filesystem)
 			refs = append(refs, filesystemRef{instance: instanceIndex, index: len(instances[instanceIndex].Filesystems) - 1})
 		}
@@ -226,6 +228,7 @@ func Print(writer io.Writer, data []Instance, jsonOutput bool) error {
 				}
 				continue
 			}
+			fmt.Fprint(writer, textfmt.FormatScanScope(filesystem.ScanScope))
 			fmt.Fprintf(writer, "  Pressure: %.1f%%  Used: %.1f%%  Inodes: %.1f%%  Available: %s\n", filesystem.Usage.PressurePercent, filesystem.Usage.UsedPercent, filesystem.Usage.InodePercent, formatBytes(filesystem.Usage.AvailableBytes))
 			if filesystem.Usage.GrowthBytesPerSecond > 0 {
 				fmt.Fprintf(writer, "  Filesystem net trend: +%s/hour\n", formatBytes(uint64(filesystem.Usage.GrowthBytesPerSecond*3600)))

@@ -54,12 +54,12 @@ func TestInspectHonorsTopAndUsesSharedSampleWindow(t *testing.T) {
 	filesystemUsage = func(path string) (disk.Filesystem, error) {
 		return disk.Filesystem{Path: path, Device: 1, AvailableBytes: 1000}, nil
 	}
-	scan = func(path string, _ uint64, _, _ int) ([]disk.File, []disk.Directory, []string, error) {
+	scan = func(path string, _ uint64, _, _ int) ([]disk.File, []disk.Directory, disk.ScanScope, []string, error) {
 		return []disk.File{
 			{Path: path + "/large", AllocatedBytes: 300},
 			{Path: path + "/medium", AllocatedBytes: 200},
 			{Path: path + "/fast", AllocatedBytes: 10, Growth: 500},
-		}, nil, []string{"partial scan"}, nil
+		}, nil, disk.ScanScope{Root: path, MaxDepth: 4, RegularFiles: 3}, []string{"partial scan"}, nil
 	}
 	measureCalls := 0
 	measureGrowthGroups = func(groups [][]disk.File, filesystems []*disk.Filesystem, interval time.Duration) error {
@@ -144,8 +144,8 @@ func TestInspectKeepsWritersWithTheirObservedRows(t *testing.T) {
 
 	filesystemUsage = func(path string) (disk.Filesystem, error) { return disk.Filesystem{Path: path, Device: 1}, nil }
 	// Overlapping roots can observe different identities at the same pathname.
-	scan = func(string, uint64, int, int) ([]disk.File, []disk.Directory, []string, error) {
-		return []disk.File{{Path: "/shared/app.log", AllocatedBytes: 100, Growth: 10}}, nil, nil, nil
+	scan = func(string, uint64, int, int) ([]disk.File, []disk.Directory, disk.ScanScope, []string, error) {
+		return []disk.File{{Path: "/shared/app.log", AllocatedBytes: 100, Growth: 10}}, nil, disk.ScanScope{}, nil, nil
 	}
 	measureGrowthGroups = func([][]disk.File, []*disk.Filesystem, time.Duration) error { return nil }
 	calls := 0
@@ -191,11 +191,11 @@ func TestInspectPropagatesWriterWarningsOnlyToInspectedPaths(t *testing.T) {
 		}
 		return disk.Filesystem{Path: path, Device: 1}, nil
 	}
-	scan = func(path string, _ uint64, _, _ int) ([]disk.File, []disk.Directory, []string, error) {
+	scan = func(path string, _ uint64, _, _ int) ([]disk.File, []disk.Directory, disk.ScanScope, []string, error) {
 		if path == "/scan-failed" {
-			return nil, nil, nil, errors.New("cannot scan")
+			return nil, nil, disk.ScanScope{}, nil, errors.New("cannot scan")
 		}
-		return []disk.File{{Path: path + "/app.log", AllocatedBytes: 100}}, nil, []string{"scan warning"}, nil
+		return []disk.File{{Path: path + "/app.log", AllocatedBytes: 100}}, nil, disk.ScanScope{Root: path, RegularFiles: 1}, []string{"scan warning"}, nil
 	}
 	measureGrowthGroups = func([][]disk.File, []*disk.Filesystem, time.Duration) error { return nil }
 	const warning = "writer attribution partial; no visible match does not establish absence"
@@ -234,5 +234,42 @@ func TestInspectPropagatesWriterWarningsOnlyToInspectedPaths(t *testing.T) {
 				t.Fatalf("visible writer lost from JSON: %+v", got)
 			}
 		}
+	}
+}
+
+func TestInspectEmptyScopeAndFailedPathsInTextAndJSON(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "child"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "child", "data"), make([]byte, 8192), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	oldAttribute := attributeWriters
+	t.Cleanup(func() { attributeWriters = oldAttribute })
+	attributeWriters = func([]disk.File) []string { return nil }
+	instances := []Instance{{Engine: "postgresql", DataPaths: []string{root, filepath.Join(root, "missing")}}}
+	inspect(instances, 1, 0, 0)
+	paths := instances[0].Filesystems
+	if len(paths) != 2 || paths[0].ScanScope == nil || paths[0].ScanScope.RegularFiles != 0 || paths[0].ScanScope.SkippedDepthDirectories != 1 || paths[0].ScanScope.MaxDepth != 0 || paths[1].ScanScope != nil || paths[1].Error == "" {
+		t.Fatalf("incorrect scan scopes: %+v", paths)
+	}
+	var output bytes.Buffer
+	if err := Print(&output, instances, false); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(output.String(), "Scan scope:") != 1 || !strings.Contains(output.String(), "max directory depth 0") || !strings.Contains(output.String(), "increase --depth") {
+		t.Fatalf("empty scope lost in text: %s", output.String())
+	}
+	output.Reset()
+	if err := Print(&output, instances, true); err != nil {
+		t.Fatal(err)
+	}
+	var decoded []Instance
+	if err := json.Unmarshal(output.Bytes(), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded[0].Filesystems[0].ScanScope == nil || *decoded[0].Filesystems[0].ScanScope != *paths[0].ScanScope || strings.Count(output.String(), `"scan_scope"`) != 1 {
+		t.Fatalf("scope lost or failed scan claimed: %s", output.String())
 	}
 }

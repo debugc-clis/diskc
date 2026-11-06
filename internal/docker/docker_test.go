@@ -49,12 +49,12 @@ func TestRunHonorsTopAndUsesSharedSampleWindow(t *testing.T) {
 	filesystemUsage = func(path string) (disk.Filesystem, error) {
 		return disk.Filesystem{Path: path, Device: 1, AvailableBytes: 1000}, nil
 	}
-	scan = func(path string, _ uint64, _, _ int) ([]disk.File, []disk.Directory, []string, error) {
+	scan = func(path string, _ uint64, _, _ int) ([]disk.File, []disk.Directory, disk.ScanScope, []string, error) {
 		return []disk.File{
 			{Path: path + "/large", AllocatedBytes: 300},
 			{Path: path + "/medium", AllocatedBytes: 200},
 			{Path: path + "/fast", AllocatedBytes: 10, Growth: 500},
-		}, nil, []string{"partial scan"}, nil
+		}, nil, disk.ScanScope{Root: path, MaxDepth: 4, RegularFiles: 3}, []string{"partial scan"}, nil
 	}
 	measureCalls := 0
 	measureGrowthGroups = func(groups [][]disk.File, filesystems []*disk.Filesystem, interval time.Duration) error {
@@ -140,8 +140,8 @@ func TestRunKeepsWritersWithTheirObservedRows(t *testing.T) {
 	discover = func() Report { return Report{Paths: []PathReport{{Path: "/docker"}, {Path: "/docker/nested"}}} }
 	filesystemUsage = func(path string) (disk.Filesystem, error) { return disk.Filesystem{Path: path, Device: 1}, nil }
 	// Overlapping roots can observe different identities at the same pathname.
-	scan = func(string, uint64, int, int) ([]disk.File, []disk.Directory, []string, error) {
-		return []disk.File{{Path: "/shared/app.log", AllocatedBytes: 100, Growth: 10}}, nil, nil, nil
+	scan = func(string, uint64, int, int) ([]disk.File, []disk.Directory, disk.ScanScope, []string, error) {
+		return []disk.File{{Path: "/shared/app.log", AllocatedBytes: 100, Growth: 10}}, nil, disk.ScanScope{}, nil, nil
 	}
 	measureGrowthGroups = func([][]disk.File, []*disk.Filesystem, time.Duration) error { return nil }
 	calls := 0
@@ -196,11 +196,11 @@ func TestRunPropagatesWriterWarningsOnlyToInspectedPaths(t *testing.T) {
 		}
 		return disk.Filesystem{Path: path, Device: 1}, nil
 	}
-	scan = func(path string, _ uint64, _, _ int) ([]disk.File, []disk.Directory, []string, error) {
+	scan = func(path string, _ uint64, _, _ int) ([]disk.File, []disk.Directory, disk.ScanScope, []string, error) {
 		if path == "/scan-failed" {
-			return nil, nil, nil, errors.New("cannot scan")
+			return nil, nil, disk.ScanScope{}, nil, errors.New("cannot scan")
 		}
-		return []disk.File{{Path: path + "/app.log", AllocatedBytes: 100}}, nil, []string{"scan warning"}, nil
+		return []disk.File{{Path: path + "/app.log", AllocatedBytes: 100}}, nil, disk.ScanScope{Root: path, RegularFiles: 1}, []string{"scan warning"}, nil
 	}
 	measureGrowthGroups = func([][]disk.File, []*disk.Filesystem, time.Duration) error { return nil }
 	const warning = "writer attribution partial; no visible match does not establish absence"
@@ -239,5 +239,40 @@ func TestRunPropagatesWriterWarningsOnlyToInspectedPaths(t *testing.T) {
 				t.Fatalf("process warning attached to failed path: %+v", path)
 			}
 		}
+	}
+}
+
+func TestRunEmptyScopeAndFailedPathsInTextAndJSON(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "child"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "child", "data"), make([]byte, 8192), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	oldDiscover, oldAttribute := discover, attributeWriters
+	t.Cleanup(func() { discover, attributeWriters = oldDiscover, oldAttribute })
+	discover = func() Report {
+		return Report{Runtime: "docker", Paths: []PathReport{{Path: root}, {Path: filepath.Join(root, "missing")}}}
+	}
+	attributeWriters = func([]disk.File) []string { return nil }
+	var output bytes.Buffer
+	if err := Run([]string{"--depth", "0", "--sample", "0", "--json"}, &output, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	var decoded Report
+	if err := json.Unmarshal(output.Bytes(), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	paths := decoded.Paths
+	if len(paths) != 2 || paths[0].ScanScope == nil || paths[0].ScanScope.RegularFiles != 0 || paths[0].ScanScope.SkippedDepthDirectories != 1 || paths[0].ScanScope.MaxDepth != 0 || paths[1].ScanScope != nil || paths[1].Error == "" || strings.Count(output.String(), `"scan_scope"`) != 1 {
+		t.Fatalf("incorrect scan scopes: %s", output.String())
+	}
+	output.Reset()
+	if err := Run([]string{"--depth", "0", "--sample", "0"}, &output, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(output.String(), "Scan scope:") != 1 || !strings.Contains(output.String(), "max directory depth 0") || !strings.Contains(output.String(), "increase --depth") {
+		t.Fatalf("empty scope lost in text: %s", output.String())
 	}
 }
