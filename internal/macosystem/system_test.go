@@ -89,6 +89,49 @@ func TestFileReportsPreserveUnmeasuredGrowth(t *testing.T) {
 	}
 }
 
+func TestPrintDirectoryEstimatesAndJSON(t *testing.T) {
+	report := Report{Platform: "darwin", Roots: []RootReport{{Path: "/private/var", Files: []FileReport{
+		{Path: "/private/var/app.log", AllocatedBytes: 4096},
+	}, Directories: []disk.Directory{
+		{Path: "/private/var/estimated\n\x1b[31m", AllocatedBytes: 8192, ApparentBytes: 8192, Estimated: true},
+		{Path: "/private/var/exact", AllocatedBytes: 4096, ApparentBytes: 4096},
+	}}}}
+	var output bytes.Buffer
+	if err := print(&output, report); err != nil {
+		t.Fatal(err)
+	}
+	estimatedRow := `8.0 KB  /private/var/estimated\n\x1b[31m  (estimated)` + "\n"
+	exactRow := "4.0 KB  /private/var/exact\n"
+	if !strings.Contains(output.String(), estimatedRow) || !strings.Contains(output.String(), exactRow) || strings.Count(output.String(), "(estimated)") != 1 {
+		t.Fatalf("directory estimate labels incorrect: %s", output.String())
+	}
+	if strings.Index(output.String(), estimatedRow) > strings.Index(output.String(), exactRow) || strings.ContainsAny(output.String(), "\x1b\r") {
+		t.Fatalf("directory order or terminal escaping changed: %q", output.String())
+	}
+	encoded, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded struct {
+		Roots []struct {
+			Directories []map[string]json.RawMessage `json:"directories"`
+		} `json:"roots"`
+	}
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded.Roots) != 1 || len(decoded.Roots[0].Directories) != 2 {
+		t.Fatalf("directory evidence missing from JSON: %s", encoded)
+	}
+	directories := decoded.Roots[0].Directories
+	if string(directories[0]["estimated"]) != "true" {
+		t.Fatalf("estimated directory lost its JSON flag: %s", encoded)
+	}
+	if _, exists := directories[1]["estimated"]; exists {
+		t.Fatalf("exact directory unexpectedly has a JSON estimate flag: %s", encoded)
+	}
+}
+
 func TestInspectEmptyRootsPreservesDistinctScopeInTextAndJSON(t *testing.T) {
 	base := t.TempDir()
 	root := filepath.Join(base, "data")

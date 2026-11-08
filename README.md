@@ -86,7 +86,9 @@ Deleted but still open (38.2 GB retained)
    38.2 GB  /var/log/payment/app-old.log  ← payment-api (PID 21819)
 ```
 
-Directory totals cover only files observed within the selected depth and current user's permissions. If a very large scan exceeds the bounded directory tracker, estimated totals are labeled and a warning is emitted.
+Directory totals cover only files observed within the selected depth and current user's permissions. If a very large scan exceeds the bounded directory tracker, affected directory rows are labeled `(estimated)` in normal, light, Docker, and macOS system text reports. JSON directory objects include `estimated: true` for these rows; the field is omitted for non-estimated rows. A scan warning also identifies bounded heavy-hitter estimates, though detailed warnings can be capped.
+
+An estimated row can include counts carried over from an evicted directory, so it is an investigation lead rather than a measured total for that path. Inspect the reported subtree as an explicit scan root with an appropriate `--depth` to narrow the investigation; a large subtree can still exceed the tracker. Rows without the estimate marker still have the scan-scope limits described below.
 
 Every successful scan reports its scope before the file rankings: the resolved root, maximum directory depth, unique regular files observed, and counts of directories skipped by depth, another filesystem, or pseudo-filesystem exclusions, plus skipped symbolic links and inspection errors. Depth is relative to the root: `--depth 0` includes files directly in the root; `--depth 1` also includes files in its immediate child directories. The scope describes the initial traversal, before candidate selection and growth sampling, so the observed file count can exceed the number of reported or sampled files.
 
@@ -178,6 +180,15 @@ diskc docker --json
 ```
 
 `diskc docker` checks configured and conventional rootful/rootless Docker data roots, containerd storage, Docker logs, BuildKit cache, sockets, and runtime processes. It does not call the Docker API and does not delete container data. All storage paths share one sampling window.
+
+Directory output excerpt from a scan that exceeded the bounded tracker:
+
+```text
+  Largest directories
+       81.0 GB  /var/lib/docker/overlay2  (estimated)
+```
+
+Use an explicit subtree scan such as `diskc light /var/lib/docker/overlay2 --depth 4` to investigate that lead. The same `(estimated)` marker appears beside affected directories in `diskc mac system`.
 
 ## Doctor
 

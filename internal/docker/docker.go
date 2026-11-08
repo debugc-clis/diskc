@@ -250,7 +250,11 @@ func printReport(writer io.Writer, report Report) error {
 		if len(path.Directories) > 0 {
 			fmt.Fprintln(writer, "  Largest directories")
 			for _, directory := range path.Directories[:min(5, len(path.Directories))] {
-				fmt.Fprintf(writer, "    %10s  %s\n", formatBytes(uint64(directory.AllocatedBytes)), textfmt.Safe(directory.Path))
+				estimated := ""
+				if directory.Estimated {
+					estimated = "  (estimated)"
+				}
+				fmt.Fprintf(writer, "    %10s  %s%s\n", formatBytes(uint64(directory.AllocatedBytes)), textfmt.Safe(directory.Path), estimated)
 			}
 		}
 		for _, warning := range path.Warnings {

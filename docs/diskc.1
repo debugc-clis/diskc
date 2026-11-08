@@ -1,4 +1,4 @@
-.TH DISKC 1 "November 6, 2026" "diskc" "User Commands"
+.TH DISKC 1 "November 8, 2026" "diskc" "User Commands"
 .SH NAME
 diskc \- explain filesystem pressure, large files, growth, and writers
 .SH SYNOPSIS
@@ -124,6 +124,20 @@ File growth is net allocated-block change, not total write throughput.
 Truncation and regrowth of the same inode between observations can be missed.
 Directory totals remain the initial scan snapshot even when sampled file sizes
 are refreshed.
+.PP
+When a scan exceeds the bounded directory tracker, affected directory rows are
+labeled (estimated) in normal, light, Docker, and macOS system text reports.
+JSON directory objects include estimated: true for these rows; the field is
+omitted for non-estimated rows. A scan warning also identifies bounded
+heavy-hitter estimates, though detailed warnings can be capped.
+.PP
+Estimated counters can include values carried over from an evicted directory;
+they are investigation leads rather than measured totals for that path.
+Inspect a reported subtree as an explicit scan root with an appropriate --depth
+to narrow the investigation, for example
+diskc light /var/lib/docker/overlay2 --depth 4.
+A large subtree can still exceed the tracker. Rows without the estimate marker
+remain subject to the scan-scope limits below.
 .SH SCAN SCOPE
 Every successful normal, light, database, Docker, and macOS system scan reports
 the resolved root, selected maximum directory depth, unique regular files

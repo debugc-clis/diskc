@@ -128,6 +128,47 @@ func TestPrintPreservesUnmeasuredGrowth(t *testing.T) {
 	}
 }
 
+func TestPrintDirectoryEstimatesAndJSON(t *testing.T) {
+	report := Report{Runtime: "docker", Paths: []PathReport{{Path: "/docker", Directories: []disk.Directory{
+		{Path: "/docker/estimated\n\x1b[31m", AllocatedBytes: 8192, ApparentBytes: 8192, Estimated: true},
+		{Path: "/docker/exact", AllocatedBytes: 4096, ApparentBytes: 4096},
+	}}}}
+	var output bytes.Buffer
+	if err := printReport(&output, report); err != nil {
+		t.Fatal(err)
+	}
+	estimatedRow := `8.0 KB  /docker/estimated\n\x1b[31m  (estimated)` + "\n"
+	exactRow := "4.0 KB  /docker/exact\n"
+	if !strings.Contains(output.String(), estimatedRow) || !strings.Contains(output.String(), exactRow) || strings.Count(output.String(), "(estimated)") != 1 {
+		t.Fatalf("directory estimate labels incorrect: %s", output.String())
+	}
+	if strings.Index(output.String(), estimatedRow) > strings.Index(output.String(), exactRow) || strings.ContainsAny(output.String(), "\x1b\r") {
+		t.Fatalf("directory order or terminal escaping changed: %q", output.String())
+	}
+	encoded, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded struct {
+		Paths []struct {
+			Directories []map[string]json.RawMessage `json:"directories"`
+		} `json:"paths"`
+	}
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded.Paths) != 1 || len(decoded.Paths[0].Directories) != 2 {
+		t.Fatalf("directory evidence missing from JSON: %s", encoded)
+	}
+	directories := decoded.Paths[0].Directories
+	if string(directories[0]["estimated"]) != "true" {
+		t.Fatalf("estimated directory lost its JSON flag: %s", encoded)
+	}
+	if _, exists := directories[1]["estimated"]; exists {
+		t.Fatalf("exact directory unexpectedly has a JSON estimate flag: %s", encoded)
+	}
+}
+
 func TestRunKeepsWritersWithTheirObservedRows(t *testing.T) {
 	oldUsage, oldScan := filesystemUsage, scan
 	oldMeasure, oldAttribute := measureGrowthGroups, attributeWriters
