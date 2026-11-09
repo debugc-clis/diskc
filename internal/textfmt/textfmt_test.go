@@ -30,6 +30,32 @@ func TestGrowthStatusNote(t *testing.T) {
 	}
 }
 
+func TestApparentSizeNote(t *testing.T) {
+	for _, test := range []struct {
+		name                string
+		allocated, apparent int64
+		want                string
+	}{
+		{"equal", 4096, 4096, ""},
+		{"zero", 4096, 0, ""},
+		{"negative", 4096, -1, ""},
+		{"block overhead", 4096, 5, "  [5 B apparent]"},
+		{"zero allocation sparse", 0, 1 << 30, "  [1.0 GB apparent]"},
+		{"bytes boundary", 4096, 1023, "  [1023 B apparent]"},
+		{"kilobytes", 4096, 1536, "  [1.5 KB apparent]"},
+		{"megabytes", 4096, 1 << 20, "  [1.0 MB apparent]"},
+		{"terabytes", 4096, 1 << 40, "  [1.0 TB apparent]"},
+		{"petabytes", 4096, 1 << 50, "  [1.0 PB apparent]"},
+		{"maximum", 4096, 1<<63 - 1, "  [8192.0 PB apparent]"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := ApparentSizeNote(test.allocated, test.apparent); got != test.want {
+				t.Fatalf("ApparentSizeNote(%d, %d) = %q; want %q", test.allocated, test.apparent, got, test.want)
+			}
+		})
+	}
+}
+
 func TestWriterKeepsFirstError(t *testing.T) {
 	writer := NewWriter(failingWriter{})
 	if _, err := writer.Write([]byte("first")); !errors.Is(err, syscall.EPIPE) {

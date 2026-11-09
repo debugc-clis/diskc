@@ -183,7 +183,7 @@ func print(writer io.Writer, report Report) error {
 			if file.Growth > 0 {
 				growth = fmt.Sprintf("  ↑ %s/s", formatBytes(uint64(file.Growth)))
 			}
-			fmt.Fprintf(writer, "    %10s  %s%s%s\n", formatBytes(uint64(file.AllocatedBytes)), textfmt.Safe(file.Path), growth, textfmt.GrowthStatusNote(file.GrowthStatus))
+			fmt.Fprintf(writer, "    %10s  %s%s%s%s\n", formatBytes(uint64(file.AllocatedBytes)), textfmt.Safe(file.Path), textfmt.ApparentSizeNote(file.AllocatedBytes, file.ApparentBytes), growth, textfmt.GrowthStatusNote(file.GrowthStatus))
 			fmt.Fprintf(writer, "      recommendation: %s\n      risk: %s\n", textfmt.Safe(file.Recommendation), textfmt.Safe(file.Risk))
 		}
 		if len(root.Growing) > 0 {
@@ -199,7 +199,7 @@ func print(writer io.Writer, report Report) error {
 				if directory.Estimated {
 					estimated = "  (estimated)"
 				}
-				fmt.Fprintf(writer, "    %10s  %s%s\n", formatBytes(uint64(directory.AllocatedBytes)), textfmt.Safe(directory.Path), estimated)
+				fmt.Fprintf(writer, "    %10s  %s%s%s\n", formatBytes(uint64(directory.AllocatedBytes)), textfmt.Safe(directory.Path), textfmt.ApparentSizeNote(directory.AllocatedBytes, directory.ApparentBytes), estimated)
 			}
 		}
 	}

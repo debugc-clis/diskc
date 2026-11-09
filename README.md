@@ -47,7 +47,9 @@ Running `diskc` with no arguments:
 8. Estimates time-to-full from net filesystem available-byte loss during the sampling window; per-file growth identifies contributors. JSON labels the basis as `filesystem_available_bytes`.
 9. Adds Linux mount, I/O pressure, RAID, overlay, and copy-on-write findings when available.
 
-Hard links are counted once per scan. Sparse files retain their apparent length in JSON and text annotations but are ranked by the blocks they actually consume.
+Hard links are counted once per scan. Files are ranked by allocated blocks. In normal, light, database, Docker, and macOS system text reports, file size rows add `[N apparent]` when the positive apparent length differs from allocated bytes. Existing directory size rows use the same annotation. JSON retains both `allocated_bytes` and `apparent_bytes`.
+
+For example, `4.0 KB  /data/sparse.img  [1.0 GB apparent]` means the file has a 1 GB logical length but currently consumes 4 KB of allocated blocks. The annotation can also show a smaller apparent length, such as a small file occupying a full block; it does not identify the cause of the difference. Use allocated bytes when investigating current disk consumption.
 
 ## Default example
 

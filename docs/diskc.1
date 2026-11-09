@@ -115,7 +115,17 @@ omits zero rate values.
 .SH SIZE SEMANTICS
 File and directory rankings use filesystem-allocated bytes rather than apparent
 length. Sparse files therefore do not look like consumed disk space, and hard
-links are counted once per scan. JSON also includes apparent bytes.
+links are counted once per scan. Normal, light, database, Docker, and macOS
+system text reports append [N apparent] to file size rows when the positive
+apparent length differs from allocated bytes. Existing directory size rows use
+the same annotation. Equal sizes and zero apparent lengths have no annotation.
+JSON retains both allocated_bytes and apparent_bytes.
+.PP
+For example, 4.0 KB /data/sparse.img [1.0 GB apparent] describes a file with a
+1 GB logical length that currently consumes 4 KB of allocated blocks. Apparent
+length can also be smaller than allocated space, such as for a small file
+occupying a full block. The annotation does not identify why the sizes differ;
+use allocated bytes to investigate current disk consumption.
 .PP
 Filesystem output distinguishes used, free, available, reserved, and pressure.
 Pressure is based on bytes unavailable to an unprivileged process.

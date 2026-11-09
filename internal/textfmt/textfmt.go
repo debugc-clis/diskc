@@ -29,6 +29,25 @@ func (writer *Writer) Write(data []byte) (int, error) {
 
 func (writer *Writer) Err() error { return writer.err }
 
+// ApparentSizeNote distinguishes logical lengths from allocated blocks for a
+// file or directory counter, including sparse files and block allocation overhead.
+func ApparentSizeNote(allocated, apparent int64) string {
+	if apparent <= 0 || apparent == allocated {
+		return ""
+	}
+	units := []string{"B", "KB", "MB", "GB", "TB", "PB"}
+	number := float64(apparent)
+	unit := 0
+	for number >= 1024 && unit < len(units)-1 {
+		number /= 1024
+		unit++
+	}
+	if unit == 0 {
+		return fmt.Sprintf("  [%d B apparent]", apparent)
+	}
+	return fmt.Sprintf("  [%.1f %s apparent]", number, units[unit])
+}
+
 // GrowthStatusNote explains why a sampled file has no measured growth rate.
 func GrowthStatusNote(status string) string {
 	switch status {

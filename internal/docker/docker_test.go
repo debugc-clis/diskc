@@ -317,3 +317,121 @@ func TestRunEmptyScopeAndFailedPathsInTextAndJSON(t *testing.T) {
 		t.Fatalf("empty scope lost in text: %s", output.String())
 	}
 }
+
+func TestPrintApparentSizesWithExistingEvidence(t *testing.T) {
+	files := []disk.File{
+		{Path: "/data/sparse\n\x1b[31m", AllocatedBytes: 8192, ApparentBytes: 1 << 30, Growth: 1024},
+		{Path: "/data/small", AllocatedBytes: 4096, ApparentBytes: 1, GrowthStatus: "replaced"},
+		{Path: "/data/equal", AllocatedBytes: 2048, ApparentBytes: 2048},
+		{Path: "/data/zero", AllocatedBytes: 1024, GrowthStatus: "unavailable"},
+	}
+	directories := []disk.Directory{
+		{Path: "/data/sparse-dir\n\x1b[31m", AllocatedBytes: 8192, ApparentBytes: 1 << 30, Estimated: true},
+		{Path: "/data/small-dir", AllocatedBytes: 4096, ApparentBytes: 1},
+		{Path: "/data/equal-dir", AllocatedBytes: 2048, ApparentBytes: 2048},
+		{Path: "/data/zero-dir", AllocatedBytes: 1024},
+	}
+	report := Report{Runtime: "docker", Paths: []PathReport{{Path: "/data", Files: files, Directories: directories}}}
+	var output bytes.Buffer
+	if err := printReport(&output, report); err != nil {
+		t.Fatal(err)
+	}
+	expectedRows := []string{
+		`8.0 KB  /data/sparse\n\x1b[31m  [1.0 GB apparent]  ↑ 1.0 KB/s`,
+		"4.0 KB  /data/small  [1 B apparent]  [growth unmeasured: file replaced; resample]",
+		"2.0 KB  /data/equal",
+		"1.0 KB  /data/zero  [growth unmeasured: file unavailable or no longer regular; last observed size]",
+		`8.0 KB  /data/sparse-dir\n\x1b[31m  [1.0 GB apparent]  (estimated)`,
+		"4.0 KB  /data/small-dir  [1 B apparent]",
+		"2.0 KB  /data/equal-dir",
+		"1.0 KB  /data/zero-dir",
+	}
+	previous := -1
+	for _, row := range expectedRows {
+		index := strings.Index(output.String(), row+"\n")
+		if index < 0 {
+			t.Fatalf("missing complete row %q in output: %s", row, output.String())
+		}
+		if index <= previous {
+			t.Fatalf("row order changed: %s", output.String())
+		}
+		previous = index
+	}
+	if strings.Count(output.String(), " apparent]") != 4 || strings.ContainsAny(output.String(), "\x1b\r") {
+		t.Fatalf("apparent-size omission or terminal escaping changed: %q", output.String())
+	}
+	encoded, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded Report
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	gotFiles, gotDirectories := decoded.Paths[0].Files, decoded.Paths[0].Directories
+	for index, file := range gotFiles {
+		if file.Path != files[index].Path || file.AllocatedBytes != files[index].AllocatedBytes || file.ApparentBytes != files[index].ApparentBytes || file.Growth != files[index].Growth || file.GrowthStatus != files[index].GrowthStatus {
+			t.Fatalf("file evidence changed in JSON: %+v; want %+v", file, files[index])
+		}
+	}
+	for index, directory := range gotDirectories {
+		if directory != directories[index] {
+			t.Fatalf("directory evidence changed in JSON: %+v; want %+v", directory, directories[index])
+		}
+	}
+}
+
+func TestSparseFileScanPreservesAllocatedRankingAndApparentSize(t *testing.T) {
+	root := t.TempDir()
+	sparsePath := filepath.Join(root, "sparse.img")
+	sparse, err := os.Create(sparsePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sparse.Truncate(1 << 30); err != nil {
+		_ = sparse.Close()
+		t.Fatal(err)
+	}
+	if err := sparse.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "allocated.bin"), bytes.Repeat([]byte{1}, 64<<10), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldDiscover, oldAttribute := discover, attributeWriters
+	t.Cleanup(func() { discover, attributeWriters = oldDiscover, oldAttribute })
+	discover = func() Report {
+		return Report{Runtime: "docker", Paths: []PathReport{{Path: root, Kind: "test storage"}}}
+	}
+	attributeWriters = func([]disk.File) []string { return nil }
+	var encoded bytes.Buffer
+	if err := Run([]string{"--sample", "0", "--top", "2", "--json"}, &encoded, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	var report Report
+	if err := json.Unmarshal(encoded.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Paths) != 1 || report.Paths[0].Error != "" {
+		t.Fatalf("unexpected report: %+v", report)
+	}
+	files := report.Paths[0].Files
+	if len(files) != 2 || files[0].Path != filepath.Join(resolvedRoot, "allocated.bin") || files[1].Path != filepath.Join(resolvedRoot, "sparse.img") {
+		t.Fatalf("files not ranked by allocated bytes: %+v", files)
+	}
+	if files[1].ApparentBytes != 1<<30 || files[1].AllocatedBytes >= files[0].AllocatedBytes || files[1].AllocatedBytes >= files[1].ApparentBytes {
+		t.Fatalf("real sparse-file size evidence lost: %+v", files)
+	}
+	var output bytes.Buffer
+	if err := Run([]string{"--sample", "0", "--top", "2"}, &output, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	sparseRow := formatBytes(uint64(files[1].AllocatedBytes)) + "  " + filepath.Join(resolvedRoot, "sparse.img") + "  [1.0 GB apparent]"
+	if !strings.Contains(output.String(), sparseRow+"\n") || strings.Index(output.String(), filepath.Join(resolvedRoot, "allocated.bin")) > strings.Index(output.String(), sparseRow) {
+		t.Fatalf("sparse-file annotation or allocated order missing: %s", output.String())
+	}
+}

@@ -134,6 +134,54 @@ func TestPrintPreservesUnmeasuredGrowth(t *testing.T) {
 	}
 }
 
+func TestPrintDistinguishesAllocatedAndApparentSizes(t *testing.T) {
+	files := []disk.File{
+		{Path: "/db/sparse\n\x1b[31m", AllocatedBytes: 8192, ApparentBytes: 1 << 30, Growth: 1024, GrowthStatus: "measured"},
+		{Path: "/db/small", AllocatedBytes: 4096, ApparentBytes: 5, GrowthStatus: "unavailable"},
+		{Path: "/db/equal", AllocatedBytes: 2048, ApparentBytes: 2048},
+		{Path: "/db/empty", AllocatedBytes: 0, ApparentBytes: 0},
+	}
+	instances := []Instance{{Engine: "postgresql", Filesystems: []Filesystem{{Path: "/db", Files: files}}}}
+	var output bytes.Buffer
+	if err := Print(&output, instances, false); err != nil {
+		t.Fatal(err)
+	}
+	rows := []string{
+		`8.0 KB  /db/sparse\n\x1b[31m  [1.0 GB apparent]  ↑ 1.0 KB/s` + "\n",
+		"4.0 KB  /db/small  [5 B apparent]  [growth unmeasured: file unavailable or no longer regular; last observed size]\n",
+		"2.0 KB  /db/equal\n",
+		"0 B  /db/empty\n",
+	}
+	previous := -1
+	for _, row := range rows {
+		index := strings.Index(output.String(), row)
+		if index < 0 || index <= previous {
+			t.Fatalf("missing or reordered row %q: %s", row, output.String())
+		}
+		previous = index
+	}
+	if strings.Count(output.String(), " apparent]") != 2 || strings.ContainsAny(output.String(), "\x1b\r") {
+		t.Fatalf("incorrect annotations or unescaped terminal controls: %q", output.String())
+	}
+	output.Reset()
+	if err := Print(&output, instances, true); err != nil {
+		t.Fatal(err)
+	}
+	var decoded []Instance
+	if err := json.Unmarshal(output.Bytes(), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	got := decoded[0].Filesystems[0].Files
+	if len(got) != len(files) {
+		t.Fatalf("JSON changed file count: %s", output.String())
+	}
+	for index, want := range files {
+		if got[index].Path != want.Path || got[index].AllocatedBytes != want.AllocatedBytes || got[index].ApparentBytes != want.ApparentBytes || got[index].Growth != want.Growth || got[index].GrowthStatus != want.GrowthStatus {
+			t.Fatalf("JSON changed observed file data: got %+v; want %+v", got[index], want)
+		}
+	}
+}
+
 func TestInspectKeepsWritersWithTheirObservedRows(t *testing.T) {
 	oldUsage, oldScan := filesystemUsage, scan
 	oldMeasure, oldAttribute := measureGrowthGroups, attributeWriters

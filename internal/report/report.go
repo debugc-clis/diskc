@@ -223,10 +223,7 @@ func growth(value float64) string {
 }
 
 func apparent(allocated, apparent int64) string {
-	if apparent <= 0 || apparent == allocated {
-		return ""
-	}
-	return fmt.Sprintf("  [%s apparent]", formatBytes(uint64(apparent)))
+	return textfmt.ApparentSizeNote(allocated, apparent)
 }
 
 func deletedBytes(files []proc.DeletedFile) uint64 {

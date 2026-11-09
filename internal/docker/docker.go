@@ -238,7 +238,7 @@ func printReport(writer io.Writer, report Report) error {
 		if len(path.Files) > 0 {
 			fmt.Fprintln(writer, "  Largest files")
 			for _, file := range path.Files {
-				fmt.Fprintf(writer, "    %10s  %s%s%s\n", formatBytes(uint64(file.AllocatedBytes)), textfmt.Safe(file.Path), growth(file.Growth), textfmt.GrowthStatusNote(file.GrowthStatus))
+				fmt.Fprintf(writer, "    %10s  %s%s%s%s\n", formatBytes(uint64(file.AllocatedBytes)), textfmt.Safe(file.Path), textfmt.ApparentSizeNote(file.AllocatedBytes, file.ApparentBytes), growth(file.Growth), textfmt.GrowthStatusNote(file.GrowthStatus))
 			}
 		}
 		if len(path.Growing) > 0 {
@@ -254,7 +254,7 @@ func printReport(writer io.Writer, report Report) error {
 				if directory.Estimated {
 					estimated = "  (estimated)"
 				}
-				fmt.Fprintf(writer, "    %10s  %s%s\n", formatBytes(uint64(directory.AllocatedBytes)), textfmt.Safe(directory.Path), estimated)
+				fmt.Fprintf(writer, "    %10s  %s%s%s\n", formatBytes(uint64(directory.AllocatedBytes)), textfmt.Safe(directory.Path), textfmt.ApparentSizeNote(directory.AllocatedBytes, directory.ApparentBytes), estimated)
 			}
 		}
 		for _, warning := range path.Warnings {
