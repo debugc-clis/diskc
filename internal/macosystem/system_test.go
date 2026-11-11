@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/debugc-clis/diskc/internal/disk"
@@ -291,5 +292,188 @@ func TestSparseFileScanPreservesAllocatedRankingAndApparentSize(t *testing.T) {
 	sparseRow := formatBytes(uint64(files[1].AllocatedBytes)) + "  " + filepath.Join(resolvedRoot, "sparse.img") + "  [1.0 GB apparent]"
 	if !strings.Contains(output.String(), sparseRow+"\n") || strings.Index(output.String(), filepath.Join(resolvedRoot, "allocated.bin")) > strings.Index(output.String(), sparseRow) {
 		t.Fatalf("sparse-file annotation or allocated order missing: %s", output.String())
+	}
+}
+
+func TestInspectRootsRetainsFailuresAndContinues(t *testing.T) {
+	base := t.TempDir()
+	good, empty := filepath.Join(base, "good"), filepath.Join(base, "empty")
+	for _, path := range []string{good, empty} {
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(good, "data.log"), make([]byte, 8192), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name, stage string
+		err         error
+	}{
+		{"stat permission", "stat", os.ErrPermission},
+		{"stat IO", "stat", syscall.EIO},
+		{"filesystem permission", "filesystem", os.ErrPermission},
+		{"filesystem disappeared", "filesystem", os.ErrNotExist},
+		{"scan IO", "scan", syscall.EIO},
+		{"scan disappeared", "scan", os.ErrNotExist},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			failed := filepath.Join(base, "failed\n\x1b[31m")
+			absent := filepath.Join(base, "absent")
+			definitions := []rootDefinition{{Path: failed, Category: "failed storage"}, {Path: absent}, {Path: good}, {Path: empty}}
+			operations := rootOperations{
+				stat: func(path string) (os.FileInfo, error) {
+					if path == failed {
+						if tc.stage == "stat" {
+							return nil, &os.PathError{Op: "stat", Path: path, Err: tc.err}
+						}
+						return os.Stat(good)
+					}
+					return os.Stat(path)
+				},
+				filesystemUsage: func(path string) (disk.Filesystem, error) {
+					if path == failed {
+						if tc.stage == "filesystem" {
+							return disk.Filesystem{}, tc.err
+						}
+						return disk.FilesystemUsage(good)
+					}
+					return disk.FilesystemUsage(path)
+				},
+				scan: func(path string, device uint64, maxDepth, limit int) ([]disk.File, []disk.Directory, disk.ScanScope, []string, error) {
+					if path == failed {
+						// Even if a failed scan returns partial data, it must not
+						// claim a successful scope or measured file rankings.
+						return []disk.File{{Path: "untrusted"}}, []disk.Directory{{Path: "untrusted"}}, disk.ScanScope{Root: path}, []string{"scan detail"}, tc.err
+					}
+					return disk.ScanWithScope(path, device, maxDepth, limit)
+				},
+			}
+			report := inspectRoots(definitions, 2, 1, 0, operations)
+			if len(report.Roots) != 3 || report.Roots[0].Path != failed || report.Roots[1].Path != good || report.Roots[2].Path != empty {
+				t.Fatalf("failed/missing/success root handling incorrect: %+v", report)
+			}
+			failure := report.Roots[0]
+			if !failure.Skipped || !strings.Contains(failure.SkipReason, tc.stage) || !strings.Contains(failure.SkipReason, tc.err.Error()) || failure.Category != "failed storage" {
+				t.Fatalf("missing failed-root evidence: %+v", failure)
+			}
+			if failure.ScanScope != nil || failure.Files != nil || failure.Growing != nil || failure.Directories != nil || failure.candidates != nil {
+				t.Fatalf("failed root claims scan evidence: %+v", failure)
+			}
+			if report.Roots[1].Skipped || report.Roots[1].ScanScope == nil || len(report.Roots[1].Files) != 1 || report.Roots[2].ScanScope == nil || report.Roots[2].Skipped {
+				t.Fatalf("valid roots lost: %+v", report.Roots)
+			}
+			if len(report.Warnings) == 0 || report.Warnings[len(report.Warnings)-1] != failure.SkipReason {
+				t.Fatalf("warning evidence lost: %+v", report.Warnings)
+			}
+			if tc.stage == "scan" && (len(report.Warnings) != 2 || report.Warnings[0] != "scan detail") {
+				t.Fatalf("fatal scan warnings lost: %+v", report.Warnings)
+			}
+			var output bytes.Buffer
+			if err := print(&output, report); err != nil {
+				t.Fatal(err)
+			}
+			text := output.String()
+			if !strings.Contains(text, "Skipped: ") || !strings.Contains(text, "review the error and access") || !strings.Contains(text, `failed\n\x1b[31m`) || strings.Contains(text, "\x1b") || strings.Contains(text, absent) || strings.Contains(text, "untrusted") {
+				t.Fatalf("failed-root output incorrect or unsafe: %q", text)
+			}
+			if strings.Count(text, "No regular files found") != 1 || strings.Count(text, "Scan scope:") != 2 || strings.Count(text, "Largest files") != 1 {
+				t.Fatalf("failed root presented as empty or successful: %s", text)
+			}
+			encoded, err := json.Marshal(report)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var decoded struct {
+				Roots []map[string]json.RawMessage `json:"roots"`
+			}
+			if err := json.Unmarshal(encoded, &decoded); err != nil {
+				t.Fatal(err)
+			}
+			failedJSON := decoded.Roots[0]
+			if string(failedJSON["skipped"]) != "true" {
+				t.Fatalf("skip flag missing in JSON: %s", encoded)
+			}
+			var reason, path string
+			if err := json.Unmarshal(failedJSON["skip_reason"], &reason); err != nil || reason != failure.SkipReason {
+				t.Fatalf("skip reason changed in JSON: %s", encoded)
+			}
+			if err := json.Unmarshal(failedJSON["path"], &path); err != nil || path != failed {
+				t.Fatalf("raw path changed in JSON: %s", encoded)
+			}
+			for _, field := range []string{"scan_scope", "files", "fastest_growing", "directories"} {
+				if _, present := failedJSON[field]; present {
+					t.Fatalf("failed JSON claims %s: %s", field, encoded)
+				}
+			}
+			if _, present := decoded.Roots[1]["skipped"]; present {
+				t.Fatalf("successful root claims skipped: %s", encoded)
+			}
+		})
+	}
+}
+
+func TestInspectRootsPartialEmptyScanKeepsScopeAndVisibilityWarning(t *testing.T) {
+	root := t.TempDir()
+	report := inspectRoots([]rootDefinition{{Path: root}}, 2, 1, 0, rootOperations{
+		stat: os.Stat, filesystemUsage: disk.FilesystemUsage,
+		scan: func(path string, device uint64, maxDepth, limit int) ([]disk.File, []disk.Directory, disk.ScanScope, []string, error) {
+			return nil, nil, disk.ScanScope{Root: path, MaxDepth: maxDepth, InspectionErrors: 1}, []string{"cannot read root: permission denied"}, nil
+		},
+	})
+	if len(report.Roots) != 1 || report.Roots[0].Skipped || report.Roots[0].ScanScope == nil || report.Roots[0].ScanScope.InspectionErrors != 1 || len(report.Warnings) != 1 {
+		t.Fatalf("partial scan evidence changed: %+v", report)
+	}
+	var output bytes.Buffer
+	if err := print(&output, report); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "No regular files observed; inspection errors may hide files.") || !strings.Contains(output.String(), "Scan scope:") || !strings.Contains(output.String(), "permission denied") || strings.Contains(output.String(), "No regular files found") || strings.Contains(output.String(), "Skipped:") {
+		t.Fatalf("partial empty scan implies verified emptiness: %s", output.String())
+	}
+	encoded, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded Report
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Roots[0].Skipped || decoded.Roots[0].ScanScope == nil || decoded.Roots[0].ScanScope.InspectionErrors != 1 || len(decoded.Warnings) != 1 {
+		t.Fatalf("partial scan evidence lost in JSON: %s", encoded)
+	}
+}
+
+func TestInspectRootsUnreadableDirectoryPreservesPartialScope(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "hidden.log"), make([]byte, 8192), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(root, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chmod(root, 0o700); err != nil {
+			t.Errorf("restore root permissions: %v", err)
+		}
+	})
+	if _, err := os.ReadDir(root); err == nil {
+		t.Skip("test identity can read a directory without permission bits")
+	} else if !os.IsPermission(err) {
+		t.Fatalf("expected directory access denial: %v", err)
+	}
+	report := inspectRoots([]rootDefinition{{Path: root}}, 2, 1, 0, rootOperations{
+		stat: os.Stat, filesystemUsage: disk.FilesystemUsage, scan: disk.ScanWithScope,
+	})
+	if len(report.Roots) != 1 || report.Roots[0].Skipped || report.Roots[0].ScanScope == nil || report.Roots[0].ScanScope.InspectionErrors == 0 || len(report.Roots[0].Files) != 0 || len(report.Warnings) == 0 {
+		t.Fatalf("unreadable-root evidence lost: %+v", report)
+	}
+	var output bytes.Buffer
+	if err := print(&output, report); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "No regular files observed; inspection errors may hide files.") || !strings.Contains(output.String(), "Scan scope:") || strings.Contains(output.String(), "No regular files found") || strings.Contains(output.String(), "Skipped:") {
+		t.Fatalf("unreadable root implies verified emptiness: %s", output.String())
 	}
 }

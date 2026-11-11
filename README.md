@@ -243,6 +243,10 @@ diskc mac system --json
 
 The command checks `/private/var`, `/Library`, `/Users`, `/Applications`, and `/System`. Large files receive conservative guidance such as `review before cleaning` or `do not delete manually`. Nothing is deleted automatically.
 
+If a root's metadata, filesystem usage, or scan cannot be inspected, the report keeps that root with `Skipped:` and the failure reason, plus a warning. Review the error and access to that root before treating the report as incident evidence. JSON marks the root with `skipped: true` and `skip_reason`, without `scan_scope` or file rankings. Optional roots that are absent at the initial metadata check are omitted quietly; a root that disappears at a later stage is reported as skipped.
+
+Traversal errors within an otherwise successful scan keep its observed files, `scan_scope.inspection_errors`, and warnings. If no regular files were observed and inspection errors occurred, text says `No regular files observed; inspection errors may hide files.` Other roots continue to be reported normally. These results describe what was visible to the current user, not complete macOS storage usage.
+
 ## JSON output
 
 Use JSON for automation or incident evidence:

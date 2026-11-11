@@ -97,23 +97,44 @@ func Run(args []string, stdout, stderr io.Writer) error {
 }
 
 func inspect(top, maxDepth int, sample time.Duration) Report {
+	return inspectRoots(roots, top, maxDepth, sample, rootOperations{
+		stat: os.Stat, filesystemUsage: disk.FilesystemUsage, scan: disk.ScanWithScope,
+	})
+}
+
+// rootOperations keeps failures at each inspection stage testable without
+// depending on the test user's filesystem permissions.
+type rootOperations struct {
+	stat            func(string) (os.FileInfo, error)
+	filesystemUsage func(string) (disk.Filesystem, error)
+	scan            func(string, uint64, int, int) ([]disk.File, []disk.Directory, disk.ScanScope, []string, error)
+}
+
+func inspectRoots(definitions []rootDefinition, top, maxDepth int, sample time.Duration, operations rootOperations) Report {
 	report := Report{Platform: runtime.GOOS}
-	for _, definition := range roots {
-		if _, err := os.Stat(definition.Path); err != nil {
+	for _, definition := range definitions {
+		skipped := func(reason string) {
+			report.Roots = append(report.Roots, RootReport{Path: definition.Path, Category: definition.Category, Skipped: true, SkipReason: reason})
+			report.Warnings = append(report.Warnings, reason)
+		}
+		if _, err := operations.stat(definition.Path); err != nil {
+			if !os.IsNotExist(err) {
+				skipped(fmt.Sprintf("cannot stat %s: %v", definition.Path, err))
+			}
 			continue
 		}
-		filesystem, err := disk.FilesystemUsage(definition.Path)
+		filesystem, err := operations.filesystemUsage(definition.Path)
 		if err != nil {
-			report.Warnings = append(report.Warnings, fmt.Sprintf("cannot inspect %s: %v", definition.Path, err))
+			skipped(fmt.Sprintf("cannot inspect filesystem for %s: %v", definition.Path, err))
 			continue
 		}
-		files, directories, scope, warnings, err := disk.ScanWithScope(definition.Path, filesystem.Device, maxDepth, top)
+		files, directories, scope, warnings, err := operations.scan(definition.Path, filesystem.Device, maxDepth, top)
+		report.Warnings = append(report.Warnings, warnings...)
 		if err != nil {
-			report.Warnings = append(report.Warnings, fmt.Sprintf("cannot scan %s: %v", definition.Path, err))
+			skipped(fmt.Sprintf("cannot scan %s: %v", definition.Path, err))
 			continue
 		}
 		report.Roots = append(report.Roots, RootReport{ScanScope: &scope, Path: definition.Path, Category: definition.Category, Directories: directories, candidates: files})
-		report.Warnings = append(report.Warnings, warnings...)
 	}
 	groups := make([][]disk.File, len(report.Roots))
 	for index := range report.Roots {
@@ -123,6 +144,9 @@ func inspect(top, maxDepth int, sample time.Duration) Report {
 		report.Warnings = append(report.Warnings, err.Error())
 	}
 	for index := range report.Roots {
+		if report.Roots[index].Skipped {
+			continue
+		}
 		largest, growing := disk.SelectReportFiles(report.Roots[index].candidates, top)
 		report.Roots[index].Files = fileReports(largest)
 		report.Roots[index].Growing = fileReports(growing)
@@ -172,9 +196,18 @@ func print(writer io.Writer, report Report) error {
 	fmt.Fprintf(writer, "macOS system disk report\nPlatform: %s\n", textfmt.Safe(report.Platform))
 	for _, root := range report.Roots {
 		fmt.Fprintf(writer, "\n%s (%s)\n", textfmt.Safe(root.Path), textfmt.Safe(root.Category))
+		if root.Skipped {
+			fmt.Fprintf(writer, "  Skipped: %s\n", textfmt.Safe(root.SkipReason))
+			fmt.Fprintln(writer, "  Next: review the error and access to this root; its contents were not inspected.")
+			continue
+		}
 		fmt.Fprint(writer, textfmt.FormatScanScope(root.ScanScope))
 		if len(root.Files) == 0 {
-			fmt.Fprintln(writer, "  No regular files found at the selected depth.")
+			if root.ScanScope != nil && root.ScanScope.InspectionErrors > 0 {
+				fmt.Fprintln(writer, "  No regular files observed; inspection errors may hide files.")
+			} else {
+				fmt.Fprintln(writer, "  No regular files found at the selected depth.")
+			}
 			continue
 		}
 		fmt.Fprintln(writer, "  Largest files")

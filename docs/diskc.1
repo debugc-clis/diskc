@@ -1,4 +1,4 @@
-.TH DISKC 1 "November 8, 2026" "diskc" "User Commands"
+.TH DISKC 1 "November 11, 2026" "diskc" "User Commands"
 .SH NAME
 diskc \- explain filesystem pressure, large files, growth, and writers
 .SH SYNOPSIS
@@ -177,6 +177,19 @@ All counters
 are present, including zeros. Scope describes the initial traversal, before
 candidate selection and growth sampling; regular_files can exceed the number
 of reported or sampled files.
+.SH MACOS ROOT VISIBILITY
+The mac system command keeps a root whose metadata, filesystem usage, or scan
+cannot be inspected. Text marks it Skipped with the failure reason and a next
+step to review the error and access; a warning also records the failure.
+JSON includes skipped: true and skip_reason on that root, without scan_scope
+or file rankings. Optional roots absent at the initial metadata check are
+omitted quietly. A root that disappears at a later stage is reported as skipped.
+.PP
+Traversal errors within an otherwise successful scan preserve observed files,
+scan_scope.inspection_errors, and warnings. When no regular files were observed
+and inspection errors occurred, text says that inspection errors may hide files.
+Other roots continue normally. The report describes current-user visibility,
+not complete macOS storage usage.
 .SH WRITER ATTRIBUTION
 On Linux, writable file descriptors are matched to each reported file's last
 observed device and inode, including when sampling is disabled. Renaming or
