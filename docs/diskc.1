@@ -237,6 +237,18 @@ not perform Linux process inspection.
 .SH EXIT STATUS
 0 indicates success or help, 1 indicates a runtime failure, and 2 indicates
 invalid command usage. Broken-pipe termination is treated as success.
+.SH MACOS PACKAGES
+From a source checkout with Go 1.22 or newer, run
+sh scripts/build-macos.sh to build Apple Silicon (arm64) and Intel (amd64)
+archives plus checksums.txt in dist/macos. An optional output directory is the
+script's only argument. Existing package and checksum files are not overwritten.
+.PP
+On the destination Mac, verify the packages with shasum -a 256 -c checksums.txt,
+then extract the matching archive. Run ./diskc version, ./diskc list,
+\&./diskc light "$HOME", or ./diskc mac system --depth 2 --top 10 in Terminal.
+The destination does not need Go or root access. Local packages are not
+Developer ID signed or notarized. Linux /proc writer attribution and
+deleted-open-file discovery are unavailable on macOS.
 .SH PERMISSIONS
 No root access is required. Files and Linux process details hidden by
 permissions cannot be reported; run diskc as the affected service user when

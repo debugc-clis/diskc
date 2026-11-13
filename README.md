@@ -332,6 +332,32 @@ Help is written to stdout. Diagnostics are written to stderr. Text output escape
 
 ## Installation
 
+### macOS executable packages
+
+From a checkout, build packages for both Apple Silicon and Intel Macs with Go 1.22 or newer:
+
+```bash
+sh scripts/build-macos.sh
+```
+
+This creates `dist/macos/diskc_macos_arm64.tar.gz`, `dist/macos/diskc_macos_amd64.tar.gz`, and `checksums.txt`. The packages contain the executable, documentation, license, and disclaimer. An optional output directory can be passed as the script's only argument. Existing package or checksum files are not overwritten; use a new output directory for another build.
+
+On the destination Mac, verify the packages and extract the one matching its processor:
+
+```bash
+cd dist/macos
+shasum -a 256 -c checksums.txt
+tar -xzf diskc_macos_arm64.tar.gz  # Apple Silicon; use diskc_macos_amd64.tar.gz for Intel
+./diskc version
+./diskc list
+./diskc light "$HOME"
+./diskc mac system --depth 2 --top 10
+```
+
+The destination Mac does not need Go or root access. Run these commands in Terminal. Locally built packages are not Developer ID signed or notarized. macOS supports capacity, inode, large-file, directory, growth, and system-storage reports; Linux `/proc` writer attribution and deleted-open-file discovery are unavailable on macOS. Reports remain limited to files visible to the current user.
+
+### Go installation
+
 Requires Go 1.22 or newer:
 
 ```bash
@@ -345,7 +371,7 @@ go build -o diskc ./cmd/diskc
 ./diskc version
 ```
 
-Tagged releases publish Linux and macOS archives for `amd64` and `arm64`, SHA-256 checksums, and archive SBOMs. Homebrew packaging is planned; do not rely on `brew install diskc` until a formula is published.
+The tagged-release workflow is configured to publish Linux and macOS archives for `amd64` and `arm64`, SHA-256 checksums, and archive SBOMs. Check GitHub releases for available downloads. Homebrew packaging is planned; do not rely on `brew install diskc` until a formula is published.
 
 Install the included manual page locally if desired:
 

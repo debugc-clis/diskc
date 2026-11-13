@@ -23,6 +23,26 @@ jobs:
       - run: go test -race ./...
       - run: go vet ./...
       - run: go build ./cmd/diskc
+      - name: Package and smoke test macOS executables
+        if: runner.os == 'macOS'
+        run: |
+          sh scripts/build-macos.sh "$RUNNER_TEMP/diskc-macos"
+          if sh scripts/build-macos.sh "$RUNNER_TEMP/diskc-macos"; then
+            echo "Expected existing macOS packages to be preserved" >&2
+            exit 1
+          fi
+          (cd "$RUNNER_TEMP/diskc-macos" && shasum -a 256 -c checksums.txt)
+          case "$(uname -m)" in
+            arm64) package_arch=arm64 ;;
+            x86_64) package_arch=amd64 ;;
+            *) exit 1 ;;
+          esac
+          smoke_dir="$RUNNER_TEMP/diskc-macos-smoke"
+          mkdir "$smoke_dir"
+          tar -xzf "$RUNNER_TEMP/diskc-macos/diskc_macos_${package_arch}.tar.gz" -C "$smoke_dir"
+          "$smoke_dir/diskc" version
+          "$smoke_dir/diskc" light "$smoke_dir" --json > "$RUNNER_TEMP/diskc-macos-light.json"
+          "$smoke_dir/diskc" mac system --depth 0 --top 1 --json > "$RUNNER_TEMP/diskc-macos-system.json"
 
   cross-build:
     runs-on: ubuntu-latest
