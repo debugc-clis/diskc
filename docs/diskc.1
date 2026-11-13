@@ -1,4 +1,4 @@
-.TH DISKC 1 "November 11, 2026" "diskc" "User Commands"
+.TH DISKC 1 "November 13, 2026" "diskc" "User Commands"
 .SH NAME
 diskc \- explain filesystem pressure, large files, growth, and writers
 .SH SYNOPSIS
@@ -177,6 +177,14 @@ All counters
 are present, including zeros. Scope describes the initial traversal, before
 candidate selection and growth sampling; regular_files can exceed the number
 of reported or sampled files.
+.SH DOCKER CONFIGURATION VISIBILITY
+If a checked daemon.json cannot be read or parsed, text and top-level JSON
+warnings include the configuration path and failure reason. Discovery continues
+with later configuration candidates or conventional storage paths, but the
+actual daemon data root may remain undiscovered. Verify the daemon configuration
+and access before treating these paths as complete incident evidence.
+Missing optional configuration files are skipped quietly. Discovery still stops
+at the first successfully read configuration.
 .SH MACOS ROOT VISIBILITY
 The mac system command keeps a root whose metadata, filesystem usage, or scan
 cannot be inspected. Text marks it Skipped with the failure reason and a next

@@ -161,20 +161,7 @@ func Discover() Report {
 		rootlessConfig := filepath.Join(current.HomeDir, ".config", "docker", "daemon.json")
 		configPaths = append(configPaths, rootlessConfig)
 	}
-	for _, configPath := range configPaths {
-		config, err := readConfig(configPath)
-		if err != nil {
-			continue
-		}
-		report.Config = configPath
-		if config.DataRoot != "" {
-			report.DataRoot = config.DataRoot
-		}
-		break
-	}
-	if report.DataRoot == "" {
-		report.DataRoot = firstExisting([]string{"/var/lib/docker", rootlessDataRoot()})
-	}
+	discoverDataRoot(&report, configPaths, []string{"/var/lib/docker", rootlessDataRoot()}, readConfig, firstExisting)
 	if report.DataRoot != "" {
 		paths = append(paths, PathReport{Path: report.DataRoot, Kind: "docker data root"})
 	}
@@ -195,6 +182,27 @@ func Discover() Report {
 	report.Rootless = strings.Contains(report.DataRoot, "/.local/share/docker") || strings.Contains(report.Socket, "/run/user/")
 	report.Processes = processes()
 	return report
+}
+
+// Keep configuration failures visible even when another config or a conventional
+// data root can be inspected. The first readable, valid config still wins.
+func discoverDataRoot(report *Report, configPaths, fallbackPaths []string,
+	read func(string) (daemonConfig, error), first func([]string) string) {
+	for _, configPath := range configPaths {
+		config, err := read(configPath)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				report.Warnings = append(report.Warnings, fmt.Sprintf("cannot inspect Docker config %s: %v; data-root discovery may be incomplete; verify daemon configuration and access", configPath, err))
+			}
+			continue
+		}
+		report.Config = configPath
+		report.DataRoot = config.DataRoot
+		break
+	}
+	if report.DataRoot == "" {
+		report.DataRoot = first(fallbackPaths)
+	}
 }
 
 func printReport(writer io.Writer, report Report) error {

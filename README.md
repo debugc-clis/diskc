@@ -183,6 +183,8 @@ diskc docker --json
 
 `diskc docker` checks configured and conventional rootful/rootless Docker data roots, containerd storage, Docker logs, BuildKit cache, sockets, and runtime processes. It does not call the Docker API and does not delete container data. All storage paths share one sampling window.
 
+If a checked `daemon.json` cannot be read or parsed, text and top-level JSON `warnings` include the configuration path and failure reason. Discovery continues with later configuration candidates or conventional storage paths, but the actual daemon data root may remain undiscovered. Verify the daemon configuration and access before treating these paths as complete incident evidence. Missing optional configuration files are skipped quietly; discovery still stops at the first successfully read configuration.
+
 Directory output excerpt from a scan that exceeded the bounded tracker:
 
 ```text
