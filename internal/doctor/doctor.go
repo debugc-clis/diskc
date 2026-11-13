@@ -244,6 +244,7 @@ func Print(writer io.Writer, report Report) error {
 	fmt.Fprintf(checked, "  db: top=%d depth=%d sample=%s\n", report.Defaults.DBTop, report.Defaults.DBDepth, report.Defaults.DBSample)
 	fmt.Fprintf(checked, "  docker: top=%d depth=%d sample=%s\n", report.Defaults.DockerTop, report.Defaults.DockerDepth, report.Defaults.DockerSample)
 	fmt.Fprintf(checked, "  mac system: top=%d depth=%d sample=%s\n", report.Defaults.MacTop, report.Defaults.MacDepth, report.Defaults.MacSample)
+	fmt.Fprintf(checked, "  mac user: top=%d depth=%d sample=%s\n", report.Defaults.MacTop, report.Defaults.MacDepth, report.Defaults.MacSample)
 	fmt.Fprintf(checked, "  all mounts: %t  watch: %t  json: %t\n", report.Defaults.All, report.Defaults.Watch, report.Defaults.JSON)
 	fmt.Fprintf(checked, "  watch interval: %s\n  Linux process checks: %t  deleted-open checks: %t\n", report.Defaults.WatchInterval, report.Defaults.ProcessChecks, report.Defaults.DeletedOpen)
 	if report.Mount != nil {

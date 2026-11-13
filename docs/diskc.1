@@ -26,6 +26,9 @@ diskc \- explain filesystem pressure, large files, growth, and writers
 .B diskc mac system
 .RI [ flags ]
 .br
+.B diskc mac user
+.RI [ flags ]
+.br
 .B diskc version
 .SH DESCRIPTION
 .B diskc
@@ -71,6 +74,11 @@ tree is scanned. --json emits a machine-readable report.
 Inspect common macOS system and user storage roots and provide conservative
 cleanup guidance. Nothing is deleted.
 .TP
+.B mac user
+Inspect selected storage directories in the current Mac user's home: caches,
+logs, application support, sandbox containers, developer data, downloads, and
+Trash. Defaults: --top 20 --depth 5 --sample 0. Nothing is deleted or emptied.
+.TP
 .B version
 Print version, commit, build date, Go version, and target platform.
 .SH OPTIONS
@@ -110,8 +118,8 @@ Delay after each completed watch scan. Default: 3s.
 Emit JSON. With --watch, emit one compact JSON value per line (NDJSON).
 Sampled files include growth_status: measured, replaced, or unavailable.
 The field is omitted when sampling is disabled. A zero rate for replaced or
-unavailable files is a placeholder, not measured zero growth; macOS system JSON
-omits zero rate values.
+unavailable files is a placeholder, not measured zero growth; macOS system and
+user JSON reports omit zero rate values.
 .SH SIZE SEMANTICS
 File and directory rankings use filesystem-allocated bytes rather than apparent
 length. Sparse files therefore do not look like consumed disk space, and hard
@@ -136,7 +144,8 @@ Directory totals remain the initial scan snapshot even when sampled file sizes
 are refreshed.
 .PP
 When a scan exceeds the bounded directory tracker, affected directory rows are
-labeled (estimated) in normal, light, Docker, and macOS system text reports.
+labeled (estimated) in normal, light, Docker, and macOS system and user text
+reports.
 JSON directory objects include estimated: true for these rows; the field is
 omitted for non-estimated rows. A scan warning also identifies bounded
 heavy-hitter estimates, though detailed warnings can be capped.
@@ -198,6 +207,26 @@ scan_scope.inspection_errors, and warnings. When no regular files were observed
 and inspection errors occurred, text says that inspection errors may hide files.
 Other roots continue normally. The report describes current-user visibility,
 not complete macOS storage usage.
+.SH MACOS USER STORAGE
+The mac user command checks Library/Caches, Library/Logs,
+Library/Application Support, Library/Containers, Library/Group Containers,
+Library/Developer, Downloads, and .Trash under the current home directory.
+It requires macOS and a valid absolute home directory. Each directory is an
+explicit scan root; --depth is relative to that location. Optional growth
+sampling uses one shared window.
+.PP
+Application support and sandbox container data retain protective guidance even
+under nested cache or log directories. Developer storage can include projects,
+archives, simulator data, and build products; review it in the owning tool.
+Missing optional roots are omitted quietly. Failed and partial inspections
+retain the skipped-root and scan-scope evidence described above.
+.PP
+JSON includes scope: "user" and home, plus platform, roots, and optional
+warnings.
+Results cover selected visible directories, not the whole home, macOS Storage
+settings totals, APFS snapshots, or purgeable space. Root symlinks are resolved;
+linked or shared content can overlap across roots. Do not sum root results as
+unique home usage.
 .SH WRITER ATTRIBUTION
 On Linux, writable file descriptors are matched to each reported file's last
 observed device and inode, including when sampling is disabled. Renaming or

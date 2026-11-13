@@ -20,6 +20,8 @@ import (
 
 type Report struct {
 	Platform string       `json:"platform"`
+	Scope    string       `json:"scope,omitempty"`
+	Home     string       `json:"home,omitempty"`
 	Roots    []RootReport `json:"roots"`
 	Warnings []string     `json:"warnings,omitempty"`
 }
@@ -193,7 +195,13 @@ func recommendation(path string, size int64) (string, string) {
 func print(writer io.Writer, report Report) error {
 	checked := textfmt.NewWriter(writer)
 	writer = checked
-	fmt.Fprintf(writer, "macOS system disk report\nPlatform: %s\n", textfmt.Safe(report.Platform))
+	if report.Scope == "user" {
+		fmt.Fprintf(writer, "macOS user disk report\nPlatform: %s\nHome: %s\n", textfmt.Safe(report.Platform), textfmt.Safe(report.Home))
+		fmt.Fprintln(writer, "Scope: selected home directories only; not whole-home usage, APFS snapshots, or purgeable space.")
+		fmt.Fprintln(writer, "Roots can share files through links; do not add their reported sizes together.")
+	} else {
+		fmt.Fprintf(writer, "macOS system disk report\nPlatform: %s\n", textfmt.Safe(report.Platform))
+	}
 	for _, root := range report.Roots {
 		fmt.Fprintf(writer, "\n%s (%s)\n", textfmt.Safe(root.Path), textfmt.Safe(root.Category))
 		if root.Skipped {

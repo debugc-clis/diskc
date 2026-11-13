@@ -43,6 +43,7 @@ jobs:
           "$smoke_dir/diskc" version
           "$smoke_dir/diskc" light "$smoke_dir" --json > "$RUNNER_TEMP/diskc-macos-light.json"
           "$smoke_dir/diskc" mac system --depth 0 --top 1 --json > "$RUNNER_TEMP/diskc-macos-system.json"
+          "$smoke_dir/diskc" mac user --depth 0 --top 1 --json > "$RUNNER_TEMP/diskc-macos-user.json"
 
   cross-build:
     runs-on: ubuntu-latest

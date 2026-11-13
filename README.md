@@ -31,6 +31,7 @@ Most incidents only need one command:
 | `diskc docker` | Inspect Docker/containerd host storage |
 | `diskc doc` | Diagnose diskc defaults, mount access, capacity, and process visibility |
 | `diskc mac system` | Inspect macOS system storage safely |
+| `diskc mac user` | Inspect the current Mac user's caches, application data, developer data, downloads, and Trash |
 | `diskc version` | Show build and platform information |
 
 ## What `diskc` does
@@ -47,7 +48,7 @@ Running `diskc` with no arguments:
 8. Estimates time-to-full from net filesystem available-byte loss during the sampling window; per-file growth identifies contributors. JSON labels the basis as `filesystem_available_bytes`.
 9. Adds Linux mount, I/O pressure, RAID, overlay, and copy-on-write findings when available.
 
-Hard links are counted once per scan. Files are ranked by allocated blocks. In normal, light, database, Docker, and macOS system text reports, file size rows add `[N apparent]` when the positive apparent length differs from allocated bytes. Existing directory size rows use the same annotation. JSON retains both `allocated_bytes` and `apparent_bytes`.
+Hard links are counted once per scan. Files are ranked by allocated blocks. In normal, light, database, Docker, and macOS system and user text reports, file size rows add `[N apparent]` when the positive apparent length differs from allocated bytes. Existing directory size rows use the same annotation. JSON retains both `allocated_bytes` and `apparent_bytes`.
 
 For example, `4.0 KB  /data/sparse.img  [1.0 GB apparent]` means the file has a 1 GB logical length but currently consumes 4 KB of allocated blocks. The annotation can also show a smaller apparent length, such as a small file occupying a full block; it does not identify the cause of the difference. Use allocated bytes when investigating current disk consumption.
 
@@ -88,19 +89,19 @@ Deleted but still open (38.2 GB retained)
    38.2 GB  /var/log/payment/app-old.log  ← payment-api (PID 21819)
 ```
 
-Directory totals cover only files observed within the selected depth and current user's permissions. If a very large scan exceeds the bounded directory tracker, affected directory rows are labeled `(estimated)` in normal, light, Docker, and macOS system text reports. JSON directory objects include `estimated: true` for these rows; the field is omitted for non-estimated rows. A scan warning also identifies bounded heavy-hitter estimates, though detailed warnings can be capped.
+Directory totals cover only files observed within the selected depth and current user's permissions. If a very large scan exceeds the bounded directory tracker, affected directory rows are labeled `(estimated)` in normal, light, Docker, and macOS system and user text reports. JSON directory objects include `estimated: true` for these rows; the field is omitted for non-estimated rows. A scan warning also identifies bounded heavy-hitter estimates, though detailed warnings can be capped.
 
 An estimated row can include counts carried over from an evicted directory, so it is an investigation lead rather than a measured total for that path. Inspect the reported subtree as an explicit scan root with an appropriate `--depth` to narrow the investigation; a large subtree can still exceed the tracker. Rows without the estimate marker still have the scan-scope limits described below.
 
 Every successful scan reports its scope before the file rankings: the resolved root, maximum directory depth, unique regular files observed, and counts of directories skipped by depth, another filesystem, or pseudo-filesystem exclusions, plus skipped symbolic links and inspection errors. Depth is relative to the root: `--depth 0` includes files directly in the root; `--depth 1` also includes files in its immediate child directories. The scope describes the initial traversal, before candidate selection and growth sampling, so the observed file count can exceed the number of reported or sampled files.
 
-Skip counts describe boundaries actually encountered, not the contents hidden behind them. A subtree is counted under the first applicable exclusion: pseudo-filesystem, depth, then filesystem device. Symbolic links inside skipped directories are not counted. Inspection errors are counted even when detailed warnings are capped. Zero counts do not establish complete filesystem visibility, and directory totals do not include directory metadata, other filesystems, deleted-open files, or unobserved contents. This scope is shown for normal, light, database, Docker, and macOS system scans.
+Skip counts describe boundaries actually encountered, not the contents hidden behind them. A subtree is counted under the first applicable exclusion: pseudo-filesystem, depth, then filesystem device. Symbolic links inside skipped directories are not counted. Inspection errors are counted even when detailed warnings are capped. Zero counts do not establish complete filesystem visibility, and directory totals do not include directory metadata, other filesystems, deleted-open files, or unobserved contents. This scope is shown for normal, light, database, Docker, and macOS system and user scans.
 
 When depth hides subtrees, increase `--depth` or inspect a relevant subtree explicitly, for example `diskc light /data/service --depth 4`. Inspect linked data directories or mounted filesystems as explicit roots when needed; an explicit remote path can block on a stale mount. Review warnings and access when inspection errors occur. These steps only collect evidence; no cleanup is performed.
 
 Scan roots that are symbolic links are resolved before scanning. For example, `diskc light /var` on macOS scans `/private/var`. File and directory paths use the resolved target; the filesystem summary keeps the requested path. Symbolic links encountered inside the scanned tree are skipped, so linked data directories must be passed as separate scan roots. Broken or looping root links produce an inspection error.
 
-File growth compares allocated blocks only when the scan and both sample observations identify the same regular file by device and inode. If a log is rotated or replaced, its current regular-file size is refreshed but its growth is marked `file replaced; resample`. A missing, unreadable, or non-regular path has unmeasured growth; the report retains its last observed regular-file size. Neither case enters the fastest-growth ranking. Run another sample to measure the current file. This applies to normal, database, Docker, and macOS system scans when sampling is enabled.
+File growth compares allocated blocks only when the scan and both sample observations identify the same regular file by device and inode. If a log is rotated or replaced, its current regular-file size is refreshed but its growth is marked `file replaced; resample`. A missing, unreadable, or non-regular path has unmeasured growth; the report retains its last observed regular-file size. Neither case enters the fastest-growth ranking. Run another sample to measure the current file. This applies to normal, database, Docker, and macOS system and user scans when sampling is enabled.
 
 Linux writer attribution uses that file's last valid observation, even with `--sample 0`. If `/var/log/app.log` is renamed after observation and another file takes its place, the original file's writable descriptors remain the matches; the replacement's processes are not attached to the earlier evidence. Paths are historical labels and may have moved. Overlapping scans keep each observation's writers separate, and each process is listed once per file even when it holds several writable descriptors. A writable descriptor is an investigation lead, not proof that the process caused the sampled growth. Verify the PID, descriptor, and service before taking action; permissions and process exits can hide matches.
 
@@ -219,6 +220,7 @@ Configuration (built-in defaults; no configuration file)
   db: top=20 depth=4 sample=3s
   docker: top=20 depth=4 sample=3s
   mac system: top=20 depth=5 sample=0s
+  mac user: top=20 depth=5 sample=0s
   all mounts: false  watch: false  json: false
   watch interval: 3s
   Linux process checks: true  deleted-open checks: true
@@ -249,6 +251,22 @@ If a root's metadata, filesystem usage, or scan cannot be inspected, the report 
 
 Traversal errors within an otherwise successful scan keep its observed files, `scan_scope.inspection_errors`, and warnings. If no regular files were observed and inspection errors occurred, text says `No regular files observed; inspection errors may hide files.` Other roots continue to be reported normally. These results describe what was visible to the current user, not complete macOS storage usage.
 
+## macOS user storage
+
+Use this focused view when a Mac is running out of space and you need to find large or growing files in the current user's common storage locations:
+
+```bash
+diskc mac user
+diskc mac user --top 10 --depth 3
+diskc mac user --sample 5s --json
+```
+
+The command checks eight directories under the current home directory: `Library/Caches`, `Library/Logs`, `Library/Application Support`, `Library/Containers`, `Library/Group Containers`, `Library/Developer`, `Downloads`, and `.Trash`. Each is an explicit scan root, so `--depth` starts at that directory rather than at `/Users`. Defaults are `--top 20 --depth 5 --sample 0`; all roots share one optional sampling window. It requires macOS and a valid absolute home directory.
+
+Text groups observed files and directories by storage location. Application Support and sandbox container files retain protective guidance even when nested paths are named caches or logs. Developer data can include projects, archives, simulator data, and build products; review it in the owning tool. Nothing is deleted or emptied. Missing optional roots are omitted quietly, and failed or partial inspections retain the same skipped-root and scan-scope evidence as `mac system`.
+
+User JSON identifies `scope: "user"` and `home`, alongside the existing `platform`, `roots`, and optional `warnings`. This covers selected directories visible to the current user. It is not a whole-home inventory or the macOS Storage settings total, and does not measure APFS snapshots or purgeable space. Symlink roots are resolved as in other scans; linked or shared content can overlap across roots, so do not sum their results as unique home usage.
+
 ## JSON output
 
 Use JSON for automation or incident evidence:
@@ -260,6 +278,7 @@ diskc db --json > database-report.json
 diskc docker --json > docker-report.json
 diskc doc --json > doctor-report.json
 diskc mac system --json > mac-report.json
+diskc mac user --json > mac-user-report.json
 ```
 
 Multiple root filesystems produce an array. File and directory objects include `allocated_bytes` and `apparent_bytes`. Filesystem objects distinguish:
@@ -271,7 +290,7 @@ Multiple root filesystems produce an array. File and directory objects include `
 - `used_percent`: actual consumed capacity.
 - `pressure_percent`: capacity unavailable to an unprivileged process; alert status uses this value.
 
-Each successful scan includes a `scan_scope` object. Normal and light reports place it beside `filesystem`; database reports place it on each inspected `filesystems` entry, Docker on each inspected `paths` entry, and macOS system reports on each inspected `roots` entry. Failed scans do not claim a successful scope. All scope counters are present, including zeros:
+Each successful scan includes a `scan_scope` object. Normal and light reports place it beside `filesystem`; database reports place it on each inspected `filesystems` entry, Docker on each inspected `paths` entry, and macOS system and user reports on each inspected `roots` entry. Failed scans do not claim a successful scope. All scope counters are present, including zeros:
 
 | Field | Meaning |
 | --- | --- |
@@ -294,7 +313,7 @@ Sampled file objects also include `growth_status`:
 | `replaced` | Device or inode changed since the scan or between sample observations; no rate was measured. |
 | `unavailable` | A sample observation failed or the path was no longer a regular file; no rate was measured. |
 
-The status is omitted when sampling is disabled. For `replaced` and `unavailable`, a numeric zero in `growth_bytes_per_second` is a placeholder, not evidence of zero growth. macOS system JSON omits zero rate values. File sampling never follows a replacement symlink.
+The status is omitted when sampling is disabled. For `replaced` and `unavailable`, a numeric zero in `growth_bytes_per_second` is a placeholder, not evidence of zero growth. macOS system and user JSON reports omit zero rate values. File sampling never follows a replacement symlink.
 
 Normal, database, and Docker file objects can include `writers` for visible Linux processes holding writable descriptors to the file's last observed identity. Identity metadata stays internal and is not added to JSON. An omitted `writers` field means no matching process was visible during inspection; it does not establish that no process writes the file.
 
@@ -352,6 +371,7 @@ tar -xzf diskc_macos_arm64.tar.gz  # Apple Silicon; use diskc_macos_amd64.tar.gz
 ./diskc list
 ./diskc light "$HOME"
 ./diskc mac system --depth 2 --top 10
+./diskc mac user --depth 3 --top 10
 ```
 
 The destination Mac does not need Go or root access. Run these commands in Terminal. Locally built packages are not Developer ID signed or notarized. macOS supports capacity, inode, large-file, directory, growth, and system-storage reports; Linux `/proc` writer attribution and deleted-open-file discovery are unavailable on macOS. Reports remain limited to files visible to the current user.

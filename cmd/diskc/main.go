@@ -42,10 +42,17 @@ func run(args []string, stdout, stderr io.Writer) int {
 		case "doc":
 			return finish(doctor.Run(args[1:], stdout), stderr)
 		case "mac":
-			if len(args) < 2 || args[1] != "system" {
-				return finish(cliutil.Usage(fmt.Errorf("mac: expected subcommand 'system'")), stderr)
+			if len(args) < 2 {
+				return finish(cliutil.Usage(fmt.Errorf("mac: expected subcommand 'system' or 'user'")), stderr)
 			}
-			return finish(macosystem.Run(args[2:], stdout, stderr), stderr)
+			switch args[1] {
+			case "system":
+				return finish(macosystem.Run(args[2:], stdout, stderr), stderr)
+			case "user":
+				return finish(macosystem.RunUser(args[2:], stdout, stderr), stderr)
+			default:
+				return finish(cliutil.Usage(fmt.Errorf("mac: expected subcommand 'system' or 'user'")), stderr)
+			}
 		case "version", "--version", "-version":
 			if len(args) != 1 {
 				return finish(cliutil.Usage(fmt.Errorf("version: unexpected argument %q", args[1])), stderr)
@@ -97,6 +104,7 @@ func printUsage(writer io.Writer, flags *flag.FlagSet) {
 	fmt.Fprintln(writer, "       diskc docker [flags]")
 	fmt.Fprintln(writer, "       diskc doc [path] [--json]")
 	fmt.Fprintln(writer, "       diskc mac system [flags]")
+	fmt.Fprintln(writer, "       diskc mac user [flags]")
 	fmt.Fprintln(writer, "       diskc version")
 	fmt.Fprintln(writer, "\nFind what is filling a filesystem. Use 'diskc list' for an instant mounted-filesystem summary.\n\nFlags:")
 	flags.SetOutput(writer)
