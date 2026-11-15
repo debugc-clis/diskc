@@ -85,6 +85,9 @@ func Run(args []string, stdout, stderr io.Writer) error {
 	report := discover()
 	for index := range report.Paths {
 		path := &report.Paths[index]
+		if path.Error != "" {
+			continue
+		}
 		usage, err := filesystemUsage(path.Path)
 		if err != nil {
 			path.Error = fmt.Sprintf("cannot inspect: %v", err)
@@ -155,15 +158,63 @@ func attachWriters(files, attributed []disk.File) []disk.File {
 
 func Discover() Report {
 	report := Report{Runtime: "docker"}
-	paths := make([]PathReport, 0)
 	configPaths := []string{"/etc/docker/daemon.json"}
 	if current, err := user.Current(); err == nil {
 		rootlessConfig := filepath.Join(current.HomeDir, ".config", "docker", "daemon.json")
 		configPaths = append(configPaths, rootlessConfig)
 	}
-	discoverDataRoot(&report, configPaths, []string{"/var/lib/docker", rootlessDataRoot()}, readConfig, firstExisting)
+	discoverPaths(&report, configPaths, []string{"/var/lib/docker", rootlessDataRoot()},
+		[]string{"/var/run/docker.sock", rootlessSocket()}, readConfig, os.Stat)
+	report.Rootless = strings.Contains(report.DataRoot, "/.local/share/docker") || strings.Contains(report.Socket, "/run/user/")
+	report.Processes = processes()
+	return report
+}
+
+// Metadata failures leave storage candidates visible without treating them as
+// confirmed roots. Missing optional paths remain quiet, and later candidates can
+// still succeed. Dependencies are per discovery so tests need no mutable hooks.
+func discoverPaths(report *Report, configPaths, fallbackPaths, socketPaths []string,
+	read func(string) (daemonConfig, error), stat func(string) (os.FileInfo, error)) {
+	paths := make([]PathReport, 0)
+	seen := make(map[string]bool)
+	probe := func(path, kind string, storage bool) bool {
+		if path == "" {
+			return false
+		}
+		_, err := stat(path)
+		if err == nil {
+			return true
+		}
+		if !os.IsNotExist(err) {
+			report.Warnings = append(report.Warnings, fmt.Sprintf("cannot inspect %s %s: %v; Docker path discovery may be incomplete; verify daemon paths and access", kind, path, err))
+			if storage {
+				paths = append(paths, PathReport{Path: path, Kind: kind, Error: fmt.Sprintf("cannot inspect during discovery: %v", err)})
+			}
+		}
+		return false
+	}
+	first := func(candidates []string, kind string, storage bool) string {
+		checked := seen
+		if !storage {
+			checked = make(map[string]bool)
+		}
+		for _, path := range candidates {
+			if checked[path] {
+				continue
+			}
+			checked[path] = true
+			if probe(path, kind, storage) {
+				return path
+			}
+		}
+		return ""
+	}
+	discoverDataRoot(report, configPaths, fallbackPaths, read, func(candidates []string) string {
+		return first(candidates, "docker data root", true)
+	})
 	if report.DataRoot != "" {
 		paths = append(paths, PathReport{Path: report.DataRoot, Kind: "docker data root"})
+		seen[report.DataRoot] = true
 	}
 	for _, candidate := range []struct {
 		path string
@@ -173,15 +224,16 @@ func Discover() Report {
 		{"/var/log/docker", "Docker logs"},
 		{"/var/lib/buildkit", "BuildKit cache"},
 	} {
-		if exists(candidate.path) && candidate.path != report.DataRoot {
+		if seen[candidate.path] {
+			continue
+		}
+		seen[candidate.path] = true
+		if probe(candidate.path, candidate.kind, true) {
 			paths = append(paths, PathReport{Path: candidate.path, Kind: candidate.kind})
 		}
 	}
 	report.Paths = uniquePaths(paths)
-	report.Socket = firstExisting([]string{"/var/run/docker.sock", rootlessSocket()})
-	report.Rootless = strings.Contains(report.DataRoot, "/.local/share/docker") || strings.Contains(report.Socket, "/run/user/")
-	report.Processes = processes()
-	return report
+	report.Socket = first(socketPaths, "Docker socket", false)
 }
 
 // Keep configuration failures visible even when another config or a conventional
@@ -270,7 +322,7 @@ func printReport(writer io.Writer, report Report) error {
 		}
 	}
 	if len(report.Paths) == 0 {
-		fmt.Fprintln(writer, "No Docker storage paths found.")
+		fmt.Fprintln(writer, "No Docker storage paths confirmed.")
 	}
 	for _, warning := range report.Warnings {
 		fmt.Fprintf(writer, "Warning: %s\n", textfmt.Safe(warning))
@@ -338,23 +390,6 @@ func rootlessSocket() string {
 		return filepath.Join(runtimeDir, "docker.sock")
 	}
 	return ""
-}
-
-func firstExisting(paths []string) string {
-	for _, path := range paths {
-		if exists(path) {
-			return path
-		}
-	}
-	return ""
-}
-
-func exists(path string) bool {
-	if path == "" {
-		return false
-	}
-	_, err := os.Stat(path)
-	return err == nil
 }
 
 func uniquePaths(paths []PathReport) []PathReport {

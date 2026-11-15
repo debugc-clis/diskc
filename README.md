@@ -186,6 +186,8 @@ diskc docker --json
 
 If a checked `daemon.json` cannot be read or parsed, text and top-level JSON `warnings` include the configuration path and failure reason. Discovery continues with later configuration candidates or conventional storage paths, but the actual daemon data root may remain undiscovered. Verify the daemon configuration and access before treating these paths as complete incident evidence. Missing optional configuration files are skipped quietly; discovery still stops at the first successfully read configuration.
 
+Permission, I/O, and other metadata errors while checking conventional storage or socket candidates also appear in top-level `warnings`, with the path, reason, and a next step to verify access and the daemon's storage/socket location. An unconfirmed storage candidate remains in `paths` with an `error`; text marks it `Unavailable` and skips capacity and file rankings. For these discovery failures, JSON retains zero-valued `usage` fields without `scan_scope` or file rankings; usage is unmeasured, not evidence of an empty filesystem. Unconfirmed fallback roots and sockets are not selected as `data_root` or `socket`; discovery continues to the next candidate until one can be confirmed. Missing optional paths are quiet. Discovery checks a bounded set of candidates, so no confirmed paths does not establish that Docker is absent.
+
 Directory output excerpt from a scan that exceeded the bounded tracker:
 
 ```text

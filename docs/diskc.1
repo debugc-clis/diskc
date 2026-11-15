@@ -194,6 +194,19 @@ actual daemon data root may remain undiscovered. Verify the daemon configuration
 and access before treating these paths as complete incident evidence.
 Missing optional configuration files are skipped quietly. Discovery still stops
 at the first successfully read configuration.
+.PP
+Permission, I/O, and other metadata errors while checking conventional storage
+or socket candidates also appear in top-level warnings, with the path, reason,
+and a next step to verify access and the daemon's storage/socket location.
+An unconfirmed storage candidate remains in JSON paths with an error; text
+marks it Unavailable and skips capacity and file rankings. For these discovery
+failures, JSON retains zero-valued usage fields without scan_scope or file
+rankings; usage is unmeasured, not evidence of an empty filesystem.
+Unconfirmed fallback roots and sockets
+are not selected as data_root or socket. Discovery continues to the next
+candidate until one can be confirmed. Missing optional paths are quiet.
+Discovery checks a bounded set of candidates, so no confirmed paths does not
+establish that Docker is absent.
 .SH MACOS ROOT VISIBILITY
 The mac system command keeps a root whose metadata, filesystem usage, or scan
 cannot be inspected. Text marks it Skipped with the failure reason and a next
