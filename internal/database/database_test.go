@@ -20,7 +20,10 @@ func TestParsePostgreSQLConfig(t *testing.T) {
 	if err := os.WriteFile(config, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	settings, paths := parseConfig(config, "postgresql")
+	settings, paths, err := parseConfig(config, "postgresql")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if settings["port"] != "5432" || settings["archive_mode"] != "on" || settings["shared_buffers"] != "1GB" {
 		t.Fatalf("unexpected settings: %#v", settings)
 	}
@@ -35,7 +38,10 @@ func TestParseRedisRelativePaths(t *testing.T) {
 	if err := os.WriteFile(config, []byte("dir ./data\nappendonly yes\nappendfilename appendonly.aof\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	settings, paths := parseConfig(config, "redis")
+	settings, paths, err := parseConfig(config, "redis")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if settings["appendonly"] != "yes" || settings["appendfilename"] != "appendonly.aof" {
 		t.Fatalf("unexpected settings: %#v", settings)
 	}

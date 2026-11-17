@@ -174,6 +174,10 @@ diskc db --json
 
 `diskc db` discovers common PostgreSQL, MySQL/MariaDB, Redis, ClickHouse, and MongoDB processes, configuration files, data directories, log paths, and disk settings. It does not connect to a database or modify data. All discovered paths share one sampling window, and unavailable paths and partial-scan warnings remain visible.
 
+If a discovered configuration cannot be opened or read to completion, text and that database instance's JSON `warnings` include the configuration path and failure reason. Settings and paths read before the failure remain available, and discovery continues with other configurations. Verify configuration access as the affected service user before treating the discovered paths as complete incident evidence. JSON remains an array of database instances; discovery warnings are separate from each filesystem's scan and writer warnings.
+
+Missing optional configurations are quiet during discovery. Configuration parsing is best-effort: it does not validate database syntax or expand included configuration files. Unreadable search directories and hidden processes can still limit discovery without a configuration-read warning; no warnings or an empty result does not establish that no database is present.
+
 ## Docker storage
 
 ```bash

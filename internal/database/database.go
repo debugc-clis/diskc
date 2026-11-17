@@ -28,6 +28,7 @@ type Instance struct {
 	LogPaths    []string          `json:"log_paths,omitempty"`
 	Processes   []Process         `json:"processes,omitempty"`
 	Filesystems []Filesystem      `json:"filesystems,omitempty"`
+	Warnings    []string          `json:"warnings,omitempty"`
 }
 
 type Process struct {
@@ -196,6 +197,9 @@ func Print(writer io.Writer, data []Instance, jsonOutput bool) error {
 				fmt.Fprintf(writer, "  %s\n", textfmt.Safe(config))
 			}
 		}
+		for _, warning := range instance.Warnings {
+			fmt.Fprintf(writer, "  Warning: %s\n", textfmt.Safe(warning))
+		}
 		if len(instance.Settings) > 0 {
 			fmt.Fprintln(writer, "Relevant settings")
 			keys := make([]string, 0, len(instance.Settings))
@@ -275,15 +279,22 @@ func formatBytes(value uint64) string {
 }
 
 func Discover() []Instance {
-	processes := processTable()
+	return discoverInstances(definitions, processTable(), parseConfig)
+}
+
+func discoverInstances(definitions []definition, processes map[string][]Process, parse func(string, string) (map[string]string, parsedPaths, error)) []Instance {
 	instances := make([]Instance, 0)
 	for _, definition := range definitions {
 		configs := matches(definition.ConfigGlobs)
 		settings := make(map[string]string)
 		dataPaths := existing(definition.DataPaths)
 		logs := make([]string, 0)
+		warnings := make([]string, 0)
 		for _, config := range configs {
-			parsed, paths := parseConfig(config, definition.Engine)
+			parsed, paths, err := parse(config, definition.Engine)
+			if err != nil {
+				warnings = append(warnings, fmt.Sprintf("cannot read configuration %s: %v; database discovery may be incomplete; verify the configuration and access as the affected service user", config, err))
+			}
 			for key, value := range parsed {
 				settings[key] = value
 			}
@@ -295,23 +306,29 @@ func Discover() []Instance {
 		if len(configs) == 0 && len(dataPaths) == 0 && len(processes[definition.Engine]) == 0 {
 			continue
 		}
-		instances = append(instances, Instance{Engine: definition.Engine, Configs: configs, Settings: settings, DataPaths: dataPaths, LogPaths: logs, Processes: processes[definition.Engine]})
+		instances = append(instances, Instance{Engine: definition.Engine, Configs: configs, Settings: settings, DataPaths: dataPaths, LogPaths: logs, Processes: processes[definition.Engine], Warnings: warnings})
 	}
 	return instances
 }
 
 type parsedPaths struct{ data, logs []string }
 
-func parseConfig(path, engine string) (map[string]string, parsedPaths) {
-	settings := make(map[string]string)
-	paths := parsedPaths{}
+func parseConfig(path, engine string) (map[string]string, parsedPaths, error) {
 	file, err := os.Open(path)
 	if err != nil {
-		return settings, paths
+		return nil, parsedPaths{}, err
 	}
 	defer file.Close()
+	return parseConfigReader(file, path, engine)
+}
+
+// Keep observations made before a read failure, but return the error so they
+// cannot be mistaken for a complete configuration inspection.
+func parseConfigReader(reader io.Reader, path, engine string) (map[string]string, parsedPaths, error) {
+	settings := make(map[string]string)
+	paths := parsedPaths{}
 	base := filepath.Dir(path)
-	scanner := bufio.NewScanner(file)
+	scanner := bufio.NewScanner(reader)
 	for scanner.Scan() {
 		line := strings.TrimSpace(strings.SplitN(scanner.Text(), "#", 2)[0])
 		if line == "" || strings.HasPrefix(line, "<!--") {
@@ -333,7 +350,7 @@ func parseConfig(path, engine string) (map[string]string, parsedPaths) {
 			settings[key] = value
 		}
 	}
-	return settings, paths
+	return settings, paths, scanner.Err()
 }
 
 func setting(line, engine string) (string, string, bool) {
