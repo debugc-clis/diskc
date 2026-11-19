@@ -176,7 +176,9 @@ diskc db --json
 
 If a discovered configuration cannot be opened or read to completion, text and that database instance's JSON `warnings` include the configuration path and failure reason. Settings and paths read before the failure remain available, and discovery continues with other configurations. Verify configuration access as the affected service user before treating the discovered paths as complete incident evidence. JSON remains an array of database instances; discovery warnings are separate from each filesystem's scan and writer warnings.
 
-Missing optional configurations are quiet during discovery. Configuration parsing is best-effort: it does not validate database syntax or expand included configuration files. Unreadable search directories and hidden processes can still limit discovery without a configuration-read warning; no warnings or an empty result does not establish that no database is present.
+Permission, I/O, and other metadata failures while checking conventional data paths or configuration-derived data/log paths also appear in the instance's `warnings`, with the path, its data/log role, reason, and a next step to verify the path and access as the affected service user. Discovery continues with other candidates. Only paths confirmed by the metadata check enter `data_paths` or `log_paths`; unconfirmed paths receive no capacity measurement or file rankings. If no configuration, data path, or process is confirmed, the warning-only JSON instance retains `engine` and `warnings` without `filesystems`; text labels it `Database candidate` and says discovery is incomplete. This identifies an investigation lead, not a confirmed database installation.
+
+Missing optional configurations and data/log paths are quiet during discovery. Configuration parsing is best-effort: it does not validate database syntax or expand included configuration files. Configuration glob search directories, configuration candidate metadata failures, and hidden processes can still limit discovery without a warning; no warnings or an empty result does not establish that no database is present.
 
 ## Docker storage
 

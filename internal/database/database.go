@@ -184,7 +184,12 @@ func Print(writer io.Writer, data []Instance, jsonOutput bool) error {
 	checked := textfmt.NewWriter(writer)
 	writer = checked
 	for _, instance := range data {
-		fmt.Fprintf(writer, "Database: %s\n", textfmt.Safe(instance.Engine))
+		if len(instance.Configs) == 0 && len(instance.DataPaths) == 0 && len(instance.Processes) == 0 && len(instance.Warnings) > 0 {
+			fmt.Fprintf(writer, "Database candidate: %s\n", textfmt.Safe(instance.Engine))
+			fmt.Fprintln(writer, "  Discovery incomplete: no configuration, data directory, or process confirmed.")
+		} else {
+			fmt.Fprintf(writer, "Database: %s\n", textfmt.Safe(instance.Engine))
+		}
 		if len(instance.Processes) > 0 {
 			fmt.Fprintln(writer, "Processes")
 			for _, process := range instance.Processes {
@@ -283,11 +288,15 @@ func Discover() []Instance {
 }
 
 func discoverInstances(definitions []definition, processes map[string][]Process, parse func(string, string) (map[string]string, parsedPaths, error)) []Instance {
+	return discoverInstancesWithStat(definitions, processes, parse, os.Stat)
+}
+
+func discoverInstancesWithStat(definitions []definition, processes map[string][]Process, parse func(string, string) (map[string]string, parsedPaths, error), stat func(string) (os.FileInfo, error)) []Instance {
 	instances := make([]Instance, 0)
 	for _, definition := range definitions {
 		configs := matches(definition.ConfigGlobs)
 		settings := make(map[string]string)
-		dataPaths := existing(definition.DataPaths)
+		dataPaths := append([]string(nil), definition.DataPaths...)
 		logs := make([]string, 0)
 		warnings := make([]string, 0)
 		for _, config := range configs {
@@ -301,9 +310,11 @@ func discoverInstances(definitions []definition, processes map[string][]Process,
 			dataPaths = append(dataPaths, paths.data...)
 			logs = append(logs, paths.logs...)
 		}
-		dataPaths = uniqueExisting(dataPaths)
-		logs = uniqueExisting(logs)
-		if len(configs) == 0 && len(dataPaths) == 0 && len(processes[definition.Engine]) == 0 {
+		dataPaths, dataWarnings := confirmedPaths(dataPaths, "data", stat)
+		logs, logWarnings := confirmedPaths(logs, "log", stat)
+		warnings = append(warnings, dataWarnings...)
+		warnings = append(warnings, logWarnings...)
+		if len(configs) == 0 && len(dataPaths) == 0 && len(processes[definition.Engine]) == 0 && len(warnings) == 0 {
 			continue
 		}
 		instances = append(instances, Instance{Engine: definition.Engine, Configs: configs, Settings: settings, DataPaths: dataPaths, LogPaths: logs, Processes: processes[definition.Engine], Warnings: warnings})
@@ -425,8 +436,24 @@ func matches(patterns []string) []string {
 	return uniqueExisting(result)
 }
 
-func existing(paths []string) []string {
-	return uniqueExisting(paths)
+// Unlike configuration glob matching, candidate data/log metadata failures are
+// retained as warnings. Only confirmed paths can enter later filesystem scans.
+func confirmedPaths(paths []string, role string, stat func(string) (os.FileInfo, error)) ([]string, []string) {
+	seen := make(map[string]bool)
+	result := make([]string, 0)
+	warnings := make([]string, 0)
+	for _, path := range paths {
+		if !filepath.IsAbs(path) || seen[path] {
+			continue
+		}
+		seen[path] = true
+		if _, err := stat(path); err == nil {
+			result = append(result, path)
+		} else if !os.IsNotExist(err) {
+			warnings = append(warnings, fmt.Sprintf("cannot inspect %s path %s: %v; database discovery may be incomplete; verify the path and access as the affected service user", role, path, err))
+		}
+	}
+	return result, warnings
 }
 
 func uniqueExisting(paths []string) []string {
