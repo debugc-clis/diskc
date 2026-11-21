@@ -292,13 +292,18 @@ func discoverInstances(definitions []definition, processes map[string][]Process,
 }
 
 func discoverInstancesWithStat(definitions []definition, processes map[string][]Process, parse func(string, string) (map[string]string, parsedPaths, error), stat func(string) (os.FileInfo, error)) []Instance {
+	return discoverInstancesWithSearch(definitions, processes, parse, stat, func(patterns []string) ([]string, []string) {
+		return configurationMatches(patterns, os.Stat, os.ReadDir)
+	})
+}
+
+func discoverInstancesWithSearch(definitions []definition, processes map[string][]Process, parse func(string, string) (map[string]string, parsedPaths, error), stat func(string) (os.FileInfo, error), search func([]string) ([]string, []string)) []Instance {
 	instances := make([]Instance, 0)
 	for _, definition := range definitions {
-		configs := matches(definition.ConfigGlobs)
+		configs, warnings := search(definition.ConfigGlobs)
 		settings := make(map[string]string)
 		dataPaths := append([]string(nil), definition.DataPaths...)
 		logs := make([]string, 0)
-		warnings := make([]string, 0)
 		for _, config := range configs {
 			parsed, paths, err := parse(config, definition.Engine)
 			if err != nil {
@@ -427,17 +432,7 @@ func processTable() map[string][]Process {
 	return result
 }
 
-func matches(patterns []string) []string {
-	result := make([]string, 0)
-	for _, pattern := range patterns {
-		matched, _ := filepath.Glob(pattern)
-		result = append(result, matched...)
-	}
-	return uniqueExisting(result)
-}
-
-// Unlike configuration glob matching, candidate data/log metadata failures are
-// retained as warnings. Only confirmed paths can enter later filesystem scans.
+// Only confirmed paths can enter later filesystem scans.
 func confirmedPaths(paths []string, role string, stat func(string) (os.FileInfo, error)) ([]string, []string) {
 	seen := make(map[string]bool)
 	result := make([]string, 0)
@@ -454,21 +449,6 @@ func confirmedPaths(paths []string, role string, stat func(string) (os.FileInfo,
 		}
 	}
 	return result, warnings
-}
-
-func uniqueExisting(paths []string) []string {
-	seen := make(map[string]bool)
-	result := make([]string, 0)
-	for _, path := range paths {
-		if !filepath.IsAbs(path) || seen[path] {
-			continue
-		}
-		if _, err := os.Stat(path); err == nil {
-			seen[path] = true
-			result = append(result, path)
-		}
-	}
-	return result
 }
 
 func resolve(base, path string) string {

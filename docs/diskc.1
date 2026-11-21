@@ -209,12 +209,21 @@ instance retains engine and warnings without filesystems. Text labels it
 Database candidate and says discovery is incomplete. This is an investigation
 lead, not a confirmed database installation.
 .PP
-Missing optional configurations and data/log paths are quiet during discovery.
-Configuration parsing is best-effort; it does not validate database syntax or
-expand included configuration files. Configuration glob search directories,
-configuration candidate metadata failures, and hidden processes can still
-limit discovery without a warning. No warnings or an empty result does not
-establish that no database is present.
+Configuration search also reports permission, I/O, and other inspection
+failures for checked search directories and configuration candidates in the
+instance's warnings. Each warning identifies the path and reason, says
+discovery may be incomplete, and recommends verifying configuration paths and
+access as the affected service user. Other search branches and configurations
+still contribute results. Only metadata-confirmed configurations enter configs
+and parsing. A search failure alone uses the same warning-only candidate
+output described above, without capacity measurements or file rankings.
+.PP
+Missing optional configurations, search directories, and data/log paths are
+quiet during discovery. Configuration parsing is best-effort; it does not
+validate database syntax or expand included configuration files. Discovery
+checks only built-in patterns and conventional paths; custom locations and
+hidden processes can still be missed without a warning. No warnings or an
+empty result does not establish that no database is present.
 .SH DOCKER CONFIGURATION VISIBILITY
 If a checked daemon.json cannot be read or parsed, text and top-level JSON
 warnings include the configuration path and failure reason. Discovery continues
